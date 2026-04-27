@@ -13892,7 +13892,26 @@ int main() {
                     else if( strstr( webResult, "VALID" ) != NULL ) {
                         // correct!
                         nextConnection->ticketServerAccepted = true;
+						// whiteList检查
+						SimpleVector<char *> *whiteListsettings = SettingsManager::getSetting("whiteList");
+						bool isInWhiteList = false;
+                        // 遍历数组
+                        for (int i = 0; i < whiteListsettings->size(); i++) {
+                            char *value = whiteListsettings->getElementDirect(i);
+							if (i == 0 && strcmp("*", value) == 0) {
+                                isInWhiteList = true;
+                                break;
+                            } else if (strcmp(nextConnection->email, value) == 0) {
+                                isInWhiteList = true;
+                                break;
+                            }
                         }
+						if (!isInWhiteList && whiteListsettings->size() > 0) {
+                            AppLog::info("Email not in whitelist, client rejected.");
+                            nextConnection->error = true;
+                            nextConnection->errorCauseString = "Email not in whitelist";
+                        }
+                    }
                     else {
                         AppLog::errorF( 
                             "Unexpected result from ticket server, "
