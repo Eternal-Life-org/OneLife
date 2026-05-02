@@ -292,7 +292,8 @@ static int numSpecialBiomes;
 static int *specialBiomes;
 static float *specialBiomeCumuWeights;
 static float specialBiomeTotalWeight;
- 
+
+static float biomeDensity = .4;
  
  
 // one vector per biome
@@ -1424,17 +1425,17 @@ static int getBaseMap( int inX, int inY, char *outGridPlacement = NULL ) {
              
  
  
-    setXYRandomSeed( 5379 );
+    setXYRandomSeed( 5379 ); // 均匀分布的随机数 [0, 1]
    
     // first step:  save rest of work if density tells us that
     // nothing is here anyway
-    double density = getXYFractal( inX, inY, 0.1, 0.25 );
+double density = getXYFractal( inX, inY, 0.1, 0.25 ); // 正态分布 ~ 0.5
    
-    // correction
-    density = sigmoid( density, 0.1 );
+    // correction 放大噪音, 空的地方特别空, 密的地方特别密, 而不是完全随机
+    density = sigmoid( density, 0.1 ); // S形曲线 ~ 0.5
    
     // scale
-    density *= .4;
+    density *= biomeDensity;
     // good for zoom in to map for teaser
     //density = 1;
    
@@ -3087,6 +3088,8 @@ char initMap() {
    
     SimpleVector<int> *list =
         SettingsManager::getIntSettingMulti( "barrierObjects" );
+
+    biomeDensity = SettingsManager::getFloatSetting( "biomeDensity", 0.4f );
        
     barrierItemList.deleteAll();
     barrierItemList.push_back_other( list );
@@ -3409,6 +3412,7 @@ char initMap() {
    
    
     // first, find all biomes
+    // 物品库中现存的biome集合
     SimpleVector<int> biomeList;
    
    
@@ -3437,8 +3441,9 @@ char initMap() {
         SettingsManager::getFloatSettingMulti( "biomeWeights" );
  
     for( int i=0; i<biomeOrderList->size(); i++ ) {
+        // 第n个biome
         int b = biomeOrderList->getElementDirect( i );
-       
+        // 第n个biome不存在于 现存物品库中的biome集合, 比如第11个,需要删除这个index
         if( biomeList.getElementIndex( b ) == -1 ) {
             biomeOrderList->deleteElement( i );
             biomeWeightList->deleteElement( i );
@@ -3447,8 +3452,11 @@ char initMap() {
         }
    
     // now add any discovered biomes to end of list
+    // 把现存物品库但是ini里没有的biome加入
     for( int i=0; i<biomeList.size(); i++ ) {
+        // 现存物品库biome, 假设是13
         int b = biomeList.getElementDirect( i );
+        // 第13个biome的weight是0.1
         if( biomeOrderList->getElementIndex( b ) == -1 ) {
             biomeOrderList->push_back( b );
             // default weight
@@ -3456,12 +3464,12 @@ char initMap() {
             }
         }
    
-    numBiomes = biomeOrderList->size();
-    biomes = biomeOrderList->getElementArray();
-    biomeWeights = biomeWeightList->getElementArray();
-    biomeCumuWeights = new float[ numBiomes ];
+    numBiomes = biomeOrderList->size(); // 10
+    biomes = biomeOrderList->getElementArray(); // 0~9
+    biomeWeights = biomeWeightList->getElementArray(); // 0.18 0.00 0.04 ...
+    biomeCumuWeights = new float[ numBiomes ]; // 积累权重? 0.18 0.18 0.22 0.40 ...
    
-    biomeTotalWeight = 0;
+    biomeTotalWeight = 0; // 1.02
     for( int i=0; i<numBiomes; i++ ) {
         biomeTotalWeight += biomeWeights[i];
         biomeCumuWeights[i] = biomeTotalWeight;
@@ -3472,29 +3480,29 @@ char initMap() {
  
  
     SimpleVector<int> *specialBiomeList =
-        SettingsManager::getIntSettingMulti( "specialBiomes" );
+        SettingsManager::getIntSettingMulti( "specialBiomes" ); // 6 5 4
    
-    numSpecialBiomes = specialBiomeList->size();
-    specialBiomes = specialBiomeList->getElementArray();
+    numSpecialBiomes = specialBiomeList->size(); // 3
+    specialBiomes = specialBiomeList->getElementArray(); // 特殊biome 6 5 4
    
-    regularBiomeLimit = numBiomes - numSpecialBiomes;
+    regularBiomeLimit = numBiomes - numSpecialBiomes; // 普通biome数量 7
  
     delete specialBiomeList;
  
     specialBiomeCumuWeights = new float[ numSpecialBiomes ];
    
-    specialBiomeTotalWeight = 0;
-    for( int i=regularBiomeLimit; i<numBiomes; i++ ) {
+    specialBiomeTotalWeight = 0; // 0.32
+    for( int i=regularBiomeLimit; i<numBiomes; i++ ) { // 第7 8 9个元素, 最后三个填的是specialBiome
         specialBiomeTotalWeight += biomeWeights[i];
-        specialBiomeCumuWeights[i-regularBiomeLimit] = specialBiomeTotalWeight;
+        specialBiomeCumuWeights[i-regularBiomeLimit] = specialBiomeTotalWeight; // 积累权重? 0.09 0.20 0.32
         }
  
  
  
  
-    naturalMapIDs = new SimpleVector<int>[ numBiomes ];
-    naturalMapChances = new SimpleVector<float>[ numBiomes ];
-    totalChanceWeight = new float[ numBiomes ];
+    naturalMapIDs = new SimpleVector<int>[ numBiomes ]; // 自然物 id
+    naturalMapChances = new SimpleVector<float>[ numBiomes ]; // 自然物 mapChance
+    totalChanceWeight = new float[ numBiomes ]; // 地形物种总概率
  
     for( int j=0; j<numBiomes; j++ ) {
         totalChanceWeight[j] = 0;
@@ -3526,7 +3534,7 @@ char initMap() {
                 strstr( o->description, "gridPlacement" );
                
             if( gridPlacementLoc != NULL ) {
-                // special grid placement
+                // special grid placement 特殊网格布局 只有泉眼用到了这种布局
                
                 int spacing = 10;
                 sscanf( gridPlacementLoc, "gridPlacement%d", &spacing );
@@ -3542,7 +3550,7 @@ char initMap() {
                         getBiomeIndex( o->biomes[ b ] ) );
                     }
  
-                int wiggleScale = 4;
+                int wiggleScale = 4; // 抖动似乎已被禁用
                
                 if( spacing > 12 ) {
                     wiggleScale = spacing / 3;
@@ -3559,7 +3567,7 @@ char initMap() {
                 gridPlacements.push_back( gp );
                 }
             else {
-                // regular fractal placement
+                // regular fractal placement 常规分形布局
                
                 for( int j=0; j< o->numBiomes; j++ ) {
                     int b = o->biomes[j];
