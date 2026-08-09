@@ -116,11 +116,11 @@ An outside application can also respond with the message PLAYER_LIST <secret># i
 will then send a list of players status in the format
 ----
 num_players
-p_id,eve_id,parent_id,gender,age,delcaredInfertile,isTutorial,name,familyName
-p_id,eve_id,parent_id,gender,age,delcaredInfertile,isTutorial,name,familyName
-p_id,eve_id,parent_id,gender,age,delcaredInfertile,isTutorial,name,familyName
+p_id,eve_id,parent_id,gender,age,delcaredInfertile,isTutorial,name,familyName,email
+p_id,eve_id,parent_id,gender,age,delcaredInfertile,isTutorial,name,familyName,email
+p_id,eve_id,parent_id,gender,age,delcaredInfertile,isTutorial,name,familyName,email
 ....
-p_id,eve_id,parent_id,gender,age,delcaredInfertile,isTutorial,name,familyName
+p_id,eve_id,parent_id,gender,age,delcaredInfertile,isTutorial,name,familyName,email
 #
 ----
 where
@@ -137,6 +137,16 @@ familyName: player's family name, assigned at birth if mother has familyName, ca
 
 if <secret> differs from playerListSecret.ini REJECTED response will be sent.
 if playerListSecret.ini is empty the request can just be PLAYER_LIST# without a secret.
+
+This fork defaults to NO authentication (playerListSecret.ini left empty), so any
+client can query with a bare PLAYER_LIST#. To protect the server, PLAYER_LIST is
+per-IP rate-limited to playerListRateLimitPerMinute queries per 60 seconds
+(settings/playerListRateLimitPerMinute.ini, default 30; 0 = unlimited); requests
+beyond the limit are rejected (connection flagged as error and closed).
+
+email (last field, after familyName): player account email. Exposed in this fork
+for live-broadcast viewer selection. The account KEY remains private; email is not
+treated as sensitive here.
 
 if memory requirement for the message was too much for the server to be
 handled the message will not be complete. to check if the server sent the full
@@ -639,11 +649,11 @@ Tells player about their current heat value.
 
 
 LN
-p_id mother_id grandmother_id great_grandmother_id ... eve_id eve=eve_id
-p_id mother_id grandmother_id great_grandmother_id ... eve_id eve=eve_id
-p_id mother_id grandmother_id great_grandmother_id ... eve_id eve=eve_id
+p_id mother_id grandmother_id great_grandmother_id ... email=email eve=eve_id
+p_id mother_id grandmother_id great_grandmother_id ... email=email eve=eve_id
+p_id mother_id grandmother_id great_grandmother_id ... email=email eve=eve_id
 ...
-p_id mother_id grandmother_id great_grandmother_id ... eve_id eve=eve_id
+p_id mother_id grandmother_id great_grandmother_id ... email=email eve=eve_id
 #
 
 
@@ -677,6 +687,9 @@ p_id first_name last_name
 Gives name of player p_id.
 
 last_name may be ommitted.
+
+This message carries only the name. The player's email is carried in the LINEAGE
+(LN) message via the email= tag (placed before the eve= tag).
 
 
 
