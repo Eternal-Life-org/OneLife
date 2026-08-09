@@ -1740,6 +1740,17 @@ static char *curseSecret = NULL;
 
 static char *playerListSecret = NULL;
 
+// per-IP rate limiting for PLAYER_LIST queries
+// (settings/playerListRateLimitPerMinute.ini; 0 = unlimited)
+typedef struct PlayerListRateRecord {
+    char *ip;
+    int requestCount;
+    double windowStartTime;
+    } PlayerListRateRecord;
+
+static SimpleVector<PlayerListRateRecord> playerListRateRecords;
+static int playerListRateLimitPerMinute = 30;
+
 void quitCleanup() {
     AppLog::info( "Cleaning up on quit..." );
 
@@ -12334,7 +12345,14 @@ void getLineageLineForPlayer( LiveObject *inPlayer,
                 inPlayer->lineage->getElementDirect( j ) );
         inVector->appendElementString( mID );
         delete [] mID;
-        }        
+        }
+    // include email tag before eve tag (client parses via strstr "email=";
+    // must precede eve= so the eve= lastToken detection still works)
+    const char *emailStr = ( inPlayer->email != NULL ) ? inPlayer->email : "";
+    char *emailTag = autoSprintf( " email=%s", emailStr );
+    inVector->appendElementString( emailTag );
+    delete [] emailTag;
+
     // include eve tag at end
     char *eveTag = autoSprintf( " eve=%d",
                                 inPlayer->lineageEveID );
@@ -13151,6 +13169,8 @@ int main() {
         playerListSecret = NULL;
         delete[] trimmed;
         }
+    playerListRateLimitPerMinute =
+        SettingsManager::getIntSetting( "playerListRateLimitPerMinute", 30 );
     SocketServer *server = new SocketServer(port, 256);
 
     sockPoll.addSocketServer( server );
@@ -13272,6 +13292,8 @@ int main() {
                 playerListSecret = NULL;
                 delete[] trimmed;
                 }
+            playerListRateLimitPerMinute =
+                SettingsManager::getIntSetting( "playerListRateLimitPerMinute", 30 );
             }
         
         
@@ -14082,14 +14104,72 @@ int main() {
                         if( !nextConnection->playerListSent ) {
                             HostAddress *a = nextConnection->sock->getRemoteHostAddress();
                             char address[100];
+                            char *ipStr = NULL;
                             if( a == NULL ) {    
                                 sprintf(address, "%s", "unknown");
                                 }
                             else {
                                 snprintf(address, 99, "%s:%d", a->mAddressString, a->mPort );
+                                ipStr = stringDuplicate( a->mAddressString );
                                 delete a;
                                 }
                             AppLog::infoF( "Got PLAYER_LIST request from address: %s", address );
+
+                            // per-IP rate limiting for PLAYER_LIST
+                            // (playerListRateLimitPerMinute queries per 60s per IP; 0 = off)
+                            char rateLimited = false;
+                            if( ipStr != NULL && playerListRateLimitPerMinute > 0 ) {
+                                double now = Time::getCurrentTime();
+                                // drop records whose 60s window has expired
+                                for( int ri = playerListRateRecords.size() - 1;
+                                     ri >= 0; ri-- ) {
+                                    PlayerListRateRecord *oldR =
+                                        playerListRateRecords.getElement( ri );
+                                    if( now - oldR->windowStartTime > 60 ) {
+                                        delete [] oldR->ip;
+                                        playerListRateRecords.deleteElement( ri );
+                                        }
+                                    }
+                                PlayerListRateRecord *r = NULL;
+                                for( int ri = 0;
+                                     ri < playerListRateRecords.size(); ri++ ) {
+                                    PlayerListRateRecord *c =
+                                        playerListRateRecords.getElement( ri );
+                                    if( strcmp( c->ip, ipStr ) == 0 ) {
+                                        r = c;
+                                        break;
+                                        }
+                                    }
+                                if( r == NULL ) {
+                                    PlayerListRateRecord newR;
+                                    newR.ip = stringDuplicate( ipStr );
+                                    newR.requestCount = 1;
+                                    newR.windowStartTime = now;
+                                    playerListRateRecords.push_back( newR );
+                                    }
+                                else if( now - r->windowStartTime >= 60 ) {
+                                    r->requestCount = 1;
+                                    r->windowStartTime = now;
+                                    }
+                                else {
+                                    r->requestCount++;
+                                    if( r->requestCount >
+                                        playerListRateLimitPerMinute ) {
+                                        rateLimited = true;
+                                        }
+                                    }
+                                }
+                            if( ipStr != NULL ) {
+                                delete [] ipStr;
+                                }
+                            if( rateLimited ) {
+                                AppLog::infoF(
+                                    "PLAYER_LIST rate limit exceeded for: %s",
+                                    address );
+                                nextConnection->error = true;
+                                nextConnection->errorCauseString =
+                                    "PLAYER_LIST rate limit exceeded";
+                                }
                             int numLive = 0;
                             for( int i=0; i<players.size(); i++ ) {
                                 LiveObject *player = players.getElement( i );
@@ -14127,10 +14207,11 @@ int main() {
                                 else {
                                     familyName = player->familyName;
                                     }
-                                playerLine = autoSprintf("%d,%d,%d,%c,%.1f,%d,%d,%s,%s\n",
+                                const char *emailStr = (player->email != NULL) ? player->email : "";
+                                playerLine = autoSprintf("%d,%d,%d,%c,%.1f,%d,%d,%s,%s,%s\n",
                                                         player->id, player->lineageEveID, player->parentID,
                                                         gender, age, player->declaredInfertile, player->isTutorial,
-                                                        name, familyName);
+                                                        name, familyName, emailStr);
                                 int playerLineLen = strlen(playerLine);
                                 if(playerLineLen + 2 > remainingLen) {
                                     delete[] playerLine;
@@ -14144,9 +14225,11 @@ int main() {
                             if(finished) {
                                 strncat(messageBuff, "#", 2);
                                 }
-                            nextConnection->sock->send( (unsigned char*)messageBuff, strlen( messageBuff ), false, false);
+                            if( !rateLimited ) {
+                                nextConnection->sock->send( (unsigned char*)messageBuff, strlen( messageBuff ), false, false);
+                                AppLog::infoF("PLAYER_LIST response-message sent to: %s", address);
+                                }
                             nextConnection->playerListSent = true;
-                            AppLog::infoF("PLAYER_LIST response-message sent to: %s", address);
                             }
                         }
                     else if( !passedSecret && stringStartsWith( message, "PLAYER_LIST" ) ) {
