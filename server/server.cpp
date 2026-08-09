@@ -17672,10 +17672,12 @@ int main() {
                                                 "+hungryWork%d", 
                                                 &hungryWorkCost );
                                         
-                                        if( nextPlayer->foodStore < 
-                                            hungryWorkCost ) {
+                                        if( nextPlayer->foodStore
+                                            + nextPlayer->yummyBonusStore
+                                            < hungryWorkCost ) {
                                             // block transition,
                                             // not enough food
+                                            // (foodStore + yummyBonusStore)
                                             r = NULL;
                                             }
                                         }
@@ -17927,17 +17929,35 @@ int main() {
                                         }
                                     
                                     if( hungryWorkCost > 0 ) {
-                                        int oldStore = nextPlayer->foodStore;
+                                        int remaining = hungryWorkCost;
                                         
-                                        nextPlayer->foodStore -= hungryWorkCost;
+                                        // 先扣叠食度 (yummyBonusStore)
+                                        if( remaining > 0 &&
+                                            nextPlayer->yummyBonusStore > 0 ) {
+                                            int fromBonus =
+                                                nextPlayer->yummyBonusStore;
+                                            if( fromBonus > remaining ) {
+                                                fromBonus = remaining;
+                                                }
+                                            nextPlayer->yummyBonusStore
+                                                -= fromBonus;
+                                            remaining -= fromBonus;
+                                            }
                                         
-                                        if( nextPlayer->foodStore < 3 ) {
-                                            if( oldStore > 3  ) {
-                                                // generally leave
-                                                // player with 3 food
-                                                // unless they had less than
-                                                // 3 to start
-                                                nextPlayer->foodStore = 3;
+                                        // 再扣饱食度 (foodStore)
+                                        // 保留原有"保底 3 food"逻辑
+                                        if( remaining > 0 ) {
+                                            int oldStore = nextPlayer->foodStore;
+                                            nextPlayer->foodStore -= remaining;
+                                            
+                                            if( nextPlayer->foodStore < 3 ) {
+                                                if( oldStore > 3  ) {
+                                                    // generally leave
+                                                    // player with 3 food
+                                                    // unless they had less than
+                                                    // 3 to start
+                                                    nextPlayer->foodStore = 3;
+                                                    }
                                                 }
                                             }
                                         nextPlayer->foodUpdate = true;
