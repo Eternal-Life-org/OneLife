@@ -6464,7 +6464,7 @@ static UpdateRecord getUpdateRecord(
 
     r.formatString = autoSprintf( 
         "%d %d %d %d %%d %%d %s %d %%d %%d %d "
-        "%.2f %s %.2f %.2f %.2f %s %d %d %d %d%s\n",
+        "%.2f %s %.2f %.2f %.2f %s %d %d %d %d%s %d %d\n",
         inPlayer->id,
         inPlayer->displayID,
         inPlayer->facingOverride,
@@ -6486,8 +6486,12 @@ static UpdateRecord getUpdateRecord(
         hideIDForClient( inPlayer->justAteID ),
         inPlayer->responsiblePlayerID,
         heldYum,
-        deathReason );
-    
+        // 末尾追加 foodStore + yummyBonusStore(foodBonus),供附近视野内玩家可见。
+        // 活人 deathReason 为空 → 这两值紧跟 heldYum。旧客户端 sscanf 结尾的死字段
+        // heldLearned 会吞掉第一个值(它从不使用),第二个被忽略 → 向后兼容不崩。
+        inPlayer->foodStore,
+        inPlayer->yummyBonusStore );
+
     delete [] deathReason;
     
 
