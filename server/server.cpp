@@ -6473,7 +6473,7 @@ static UpdateRecord getUpdateRecord(
 
     r.formatString = autoSprintf( 
         "%d %d %d %d %%d %%d %s %d %%d %%d %d "
-        "%.2f %s %.2f %.2f %.2f %s %d %d %d %d%s %d %d\n",
+        "%.2f %s %.2f %.2f %.2f %s %d %d %d %d%s %d %d %d\n",
         inPlayer->id,
         inPlayer->displayID,
         inPlayer->facingOverride,
@@ -6500,7 +6500,10 @@ static UpdateRecord getUpdateRecord(
         // heldLearned 会吞掉第一个值(它从不使用),第二个被忽略 → 向后兼容不崩。
         deathReason,
         inPlayer->foodStore,
-        inPlayer->yummyBonusStore );
+        inPlayer->yummyBonusStore,
+        // foodCapacity:年龄/适应度实时算出的真值(婴儿 3 → 成人 10),修复他人视角
+        // cap 误判 10。旧服务端不传此字段 → 客户端 sscanf 不匹配 → 兜底回 10。
+        computeFoodCapacity( inPlayer ) );
 
     delete [] deathReason;
     
