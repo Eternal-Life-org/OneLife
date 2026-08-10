@@ -302,6 +302,9 @@ void temp_passwordRecordTransfer() {
 static SimpleVector<char*> infertilityDeclaringPhrases;
 static SimpleVector<char*> fertilityDeclaringPhrases;
 
+// 直播开启指令短语 (无参, 前缀匹配, 仿 infertilityDeclaring; 触发词见 settings/liveStreamEnablingPhrases.ini)
+static SimpleVector<char*> liveStreamEnablingPhrases;
+
 
 
 
@@ -549,6 +552,7 @@ typedef struct FreshConnection {
         char *twinCode;
         int twinCount;
         char playerListSent;
+        char liveStreamSent;
 
         int mMapD;
     } FreshConnection;
@@ -916,6 +920,10 @@ typedef struct LiveObject {
         timeSec_t birthCoolDown;
         
         bool declaredInfertile;
+
+        // 直播 opt-in: 玩家说"开启直播"指令后置 true, 非持久, 每条命重置
+        // (仅 LIVE_STREAM 外部查询可见, 场内不广播名字)
+        bool streaming;
 
         timeSec_t lastRegionLookTime;
         
@@ -1933,6 +1941,7 @@ void quitCleanup() {
     namedGivingPhrases.deallocateStringElements();
     infertilityDeclaringPhrases.deallocateStringElements();
     fertilityDeclaringPhrases.deallocateStringElements();
+    liveStreamEnablingPhrases.deallocateStringElements();
     
     // password-protected objects
     passwordProtectingPhrases.deallocateStringElements();
@@ -8280,6 +8289,7 @@ int processLoggedInPlayer( char inAllowReconnect,
     
     newObject.birthCoolDown = 0;
     newObject.declaredInfertile = false;
+    newObject.streaming = false;
     
     newObject.monumentPosSet = false;
     newObject.monumentPosSent = true;
@@ -10635,6 +10645,13 @@ char *isFertilityDeclaringSay( char *inSaidString ) {
     }
 
 
+// 直播开启指令检测 (前缀匹配, 仿 isInfertilityDeclaringSay; 忽略返回的"名字"参数)
+// 玩家在 SAY 中说 "开启直播" -> isNamingSay 前缀命中即返回非 NULL
+char *isLiveStreamEnablingSay( char *inSaidString ) {
+    return isNamingSay( inSaidString, &liveStreamEnablingPhrases );
+    }
+
+
 
 static char isWildcardGivingSay( char *inSaidString,
                                  SimpleVector<char*> *inPhrases ) {
@@ -12958,6 +12975,7 @@ int main() {
     
     readPhrases( "infertilityDeclaringPhrases", &infertilityDeclaringPhrases );
     readPhrases( "fertilityDeclaringPhrases", &fertilityDeclaringPhrases );
+    readPhrases( "liveStreamEnablingPhrases", &liveStreamEnablingPhrases );
 
     eveName = 
         SettingsManager::getStringSetting( "eveName", "EVE" );
@@ -13788,6 +13806,7 @@ int main() {
                 newConnection.errorCauseString = "";
                 newConnection.rejectedSendTime = 0;
                 newConnection.playerListSent = false;
+                newConnection.liveStreamSent = false;
                 int messageLength = strlen( message );
                 
                 int numSent = 
@@ -14251,6 +14270,188 @@ int main() {
                         nextConnection->error = true;
                         nextConnection->errorCauseString = "Bad secret for PLAYER_LIST message";
                     }
+                    // ---- LIVE_STREAM: 与 PLAYER_LIST 字段相同, 仅返回已开启直播(streaming)的玩家 ----
+                    else if( stringStartsWith( message, "LIVE_STREAM" ) ) {
+                        char lsPassedSecret = false;
+                        if( playerListSecret == NULL ) {
+                            if( 0 == strcmp( message, "LIVE_STREAM" ) ) {
+                                lsPassedSecret = true;
+                                }
+                            }
+                        else {
+                            char *requestWithSecret =
+                                autoSprintf( "LIVE_STREAM %s", playerListSecret );
+                            if( 0 == constant_time_strcmp( message,
+                                                           requestWithSecret ) ) {
+                                lsPassedSecret = true;
+                                }
+                            delete [] requestWithSecret;
+                            }
+
+                        if( !lsPassedSecret ) {
+                            HostAddress *a = nextConnection->sock->getRemoteHostAddress();
+                            char address[100];
+                            if( a == NULL ) {
+                                sprintf(address, "%s", "unknown");
+                                }
+                            else {
+                                snprintf(address, 99, "%s:%d",
+                                         a->mAddressString, a->mPort );
+                                delete a;
+                                }
+                            AppLog::infoF(
+                                "Invalid secret for request LIVE_STREAM "
+                                "from address: %s", address );
+                            nextConnection->error = true;
+                            nextConnection->errorCauseString =
+                                "Bad secret for LIVE_STREAM message";
+                            }
+                        else if( !nextConnection->liveStreamSent ) {
+                            HostAddress *a = nextConnection->sock->getRemoteHostAddress();
+                            char address[100];
+                            char *ipStr = NULL;
+                            if( a == NULL ) {
+                                sprintf(address, "%s", "unknown");
+                                }
+                            else {
+                                snprintf(address, 99, "%s:%d",
+                                         a->mAddressString, a->mPort );
+                                ipStr = stringDuplicate( a->mAddressString );
+                                delete a;
+                                }
+                            AppLog::infoF(
+                                "Got LIVE_STREAM request from address: %s",
+                                address );
+
+                            // per-IP 限流 (复用 PLAYER_LIST 的限流记录与阈值)
+                            char rateLimited = false;
+                            if( ipStr != NULL &&
+                                playerListRateLimitPerMinute > 0 ) {
+                                double now = Time::getCurrentTime();
+                                for( int ri = playerListRateRecords.size() - 1;
+                                     ri >= 0; ri-- ) {
+                                    PlayerListRateRecord *oldR =
+                                        playerListRateRecords.getElement( ri );
+                                    if( now - oldR->windowStartTime > 60 ) {
+                                        delete [] oldR->ip;
+                                        playerListRateRecords.deleteElement( ri );
+                                        }
+                                    }
+                                PlayerListRateRecord *r = NULL;
+                                for( int ri = 0;
+                                     ri < playerListRateRecords.size(); ri++ ) {
+                                    PlayerListRateRecord *c =
+                                        playerListRateRecords.getElement( ri );
+                                    if( strcmp( c->ip, ipStr ) == 0 ) {
+                                        r = c;
+                                        break;
+                                        }
+                                    }
+                                if( r == NULL ) {
+                                    PlayerListRateRecord newR;
+                                    newR.ip = stringDuplicate( ipStr );
+                                    newR.requestCount = 1;
+                                    newR.windowStartTime = now;
+                                    playerListRateRecords.push_back( newR );
+                                    }
+                                else if( now - r->windowStartTime >= 60 ) {
+                                    r->requestCount = 1;
+                                    r->windowStartTime = now;
+                                    }
+                                else {
+                                    r->requestCount++;
+                                    if( r->requestCount >
+                                        playerListRateLimitPerMinute ) {
+                                        rateLimited = true;
+                                        }
+                                    }
+                                }
+                            if( ipStr != NULL ) {
+                                delete [] ipStr;
+                                }
+                            if( rateLimited ) {
+                                AppLog::infoF(
+                                    "LIVE_STREAM rate limit exceeded for: %s",
+                                    address );
+                                nextConnection->error = true;
+                                nextConnection->errorCauseString =
+                                    "LIVE_STREAM rate limit exceeded";
+                                }
+
+                            int numLive = 0;
+                            for( int i=0; i<players.size(); i++ ) {
+                                LiveObject *player = players.getElement( i );
+                                if( ! player->error && player->streaming ) {
+                                    numLive += 1;
+                                    }
+                                }
+                            int buffSize = 32 * 1024;
+                            char messageBuff[buffSize];
+                            messageBuff[0] = '\0';
+                            sprintf(messageBuff, "%d\n", numLive);
+                            int remainingLen =
+                                buffSize - 2 - strlen(messageBuff);
+                            float age;
+                            char gender, *name, *familyName;
+                            char finished = true;
+                            char *playerLine;
+                            for( int i = 0; i < players.size(); i++ ) {
+                                LiveObject *player = players.getElement( i );
+                                if( player->error ) {
+                                    continue;
+                                    }
+                                // 仅返回已开启直播的玩家
+                                if( ! player->streaming ) {
+                                    continue;
+                                    }
+                                gender = getFemale( player ) ? 'F' : 'M';
+                                age = (float) computeAge(
+                                    player->lifeStartTimeSeconds );
+                                if(player->name == NULL) {
+                                    name = (char*)"";
+                                    }
+                                else {
+                                    name = player->name;
+                                    }
+                                if(player->familyName == NULL) {
+                                    familyName = (char*)"";
+                                    }
+                                else {
+                                    familyName = player->familyName;
+                                    }
+                                const char *emailStr =
+                                    (player->email != NULL) ? player->email : "";
+                                playerLine = autoSprintf(
+                                    "%d,%d,%d,%c,%.1f,%d,%d,%s,%s,%s\n",
+                                    player->id, player->lineageEveID,
+                                    player->parentID, gender, age,
+                                    player->declaredInfertile,
+                                    player->isTutorial,
+                                    name, familyName, emailStr);
+                                int playerLineLen = strlen(playerLine);
+                                if(playerLineLen + 2 > remainingLen) {
+                                    delete[] playerLine;
+                                    finished = false;
+                                    break;
+                                    }
+                                strncat(messageBuff, playerLine, playerLineLen);
+                                remainingLen -= playerLineLen;
+                                delete[] playerLine;
+                                }
+                            if(finished) {
+                                strncat(messageBuff, "#", 2);
+                                }
+                            if( !rateLimited ) {
+                                nextConnection->sock->send(
+                                    (unsigned char*)messageBuff,
+                                    strlen( messageBuff ), false, false);
+                                AppLog::infoF(
+                                    "LIVE_STREAM response-message sent to: %s",
+                                    address );
+                                }
+                            nextConnection->liveStreamSent = true;
+                            }
+                        }
                     else if( strstr( message, "LOGIN" ) != NULL ) {
                         
                         SimpleVector<char *> *tokens =
@@ -14571,7 +14772,8 @@ int main() {
                     
                     delete [] message;
                     }
-                else if(nextConnection->playerListSent) {
+                else if(nextConnection->playerListSent ||
+                        nextConnection->liveStreamSent) {
                     int timeToClose = playerListSecret != NULL ? 10 : 4; // give more time if it is private.
                     if(currentTime - nextConnection->connectionStartTimeSeconds > timeToClose) {
                         HostAddress *a = nextConnection->sock->getRemoteHostAddress();
@@ -14583,7 +14785,7 @@ int main() {
                             snprintf(address, 99, "%s:%d", a->mAddressString, a->mPort );
                             delete a;
                             }
-                        AppLog::infoF("Closing socket of %s for PLAYER_LIST request after %d seconds", address, timeToClose);
+                        AppLog::infoF("Closing socket of %s for PLAYER_LIST/LIVE_STREAM request after %d seconds", address, timeToClose);
                         deleteMembers( nextConnection );
                         newConnections.deleteElement(i);
                         i--;
@@ -16810,6 +17012,13 @@ int main() {
                             }
                         }
                         
+
+                        // 直播 opt-in: 说"开启直播"即标记直播中 (只开不关, 静默, 非持久)
+                        // 不限性别; 不改 displayedName / 不广播 (仅 LIVE_STREAM 外部查询可见)
+                        if( !nextPlayer->streaming &&
+                            isLiveStreamEnablingSay( m.saidText ) != NULL ) {
+                            nextPlayer->streaming = true;
+                            }
 
                         
                         LiveObject *otherToForgive = NULL;
