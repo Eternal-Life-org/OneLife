@@ -14272,41 +14272,8 @@ int main() {
                     }
                     // ---- LIVE_STREAM: 与 PLAYER_LIST 字段相同, 仅返回已开启直播(streaming)的玩家 ----
                     else if( stringStartsWith( message, "LIVE_STREAM" ) ) {
-                        char lsPassedSecret = false;
-                        if( playerListSecret == NULL ) {
-                            if( 0 == strcmp( message, "LIVE_STREAM" ) ) {
-                                lsPassedSecret = true;
-                                }
-                            }
-                        else {
-                            char *requestWithSecret =
-                                autoSprintf( "LIVE_STREAM %s", playerListSecret );
-                            if( 0 == constant_time_strcmp( message,
-                                                           requestWithSecret ) ) {
-                                lsPassedSecret = true;
-                                }
-                            delete [] requestWithSecret;
-                            }
-
-                        if( !lsPassedSecret ) {
-                            HostAddress *a = nextConnection->sock->getRemoteHostAddress();
-                            char address[100];
-                            if( a == NULL ) {
-                                sprintf(address, "%s", "unknown");
-                                }
-                            else {
-                                snprintf(address, 99, "%s:%d",
-                                         a->mAddressString, a->mPort );
-                                delete a;
-                                }
-                            AppLog::infoF(
-                                "Invalid secret for request LIVE_STREAM "
-                                "from address: %s", address );
-                            nextConnection->error = true;
-                            nextConnection->errorCauseString =
-                                "Bad secret for LIVE_STREAM message";
-                            }
-                        else if( !nextConnection->liveStreamSent ) {
+                        // 公开接口(返回 opt-in 直播玩家), 不鉴权, 仅靠 per-IP 限流
+                        if( !nextConnection->liveStreamSent ) {
                             HostAddress *a = nextConnection->sock->getRemoteHostAddress();
                             char address[100];
                             char *ipStr = NULL;
