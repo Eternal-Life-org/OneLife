@@ -943,6 +943,10 @@ typedef struct LiveObject {
         // (复用既有免疫/不可见/场景接收守卫)+ liveViewMode=true(标记只读:
         // 阻断 VOG* 写命令,只响应 LVO* 命令)。与 VOG 上帝模式权限分离。
         char liveViewMode;
+        // 直播观察:当前跟随的主播 p_id(-1=未跟随)。服务端据此把观众的地图
+        // 发送位置持续对齐到主播,使增量 MC 围绕主播实时加载(否则观众 xd/yd
+        // 仅在 LVOF 时设一次,主播走远后地图不再加载)。
+        int liveViewTargetID;
         GridPos preVogPos;
         GridPos preVogBirthPos;
         int vogJumpIndex;
@@ -8331,6 +8335,7 @@ int processLoggedInPlayer( char inAllowReconnect,
 
     newObject.vogMode = false;
     newObject.liveViewMode = false;
+    newObject.liveViewTargetID = -1;
     newObject.postVogMode = false;
     newObject.vogJumpIndex = 0;
     
@@ -15768,6 +15773,7 @@ int main() {
                         ! nextPlayer->vogMode ) {
                         nextPlayer->vogMode = true;
                         nextPlayer->liveViewMode = true;
+                        nextPlayer->liveViewTargetID = -1;
                         nextPlayer->preVogPos = getPlayerPos( nextPlayer );
                         nextPlayer->preVogBirthPos = nextPlayer->birthPos;
                         nextPlayer->foodStore =
@@ -15806,6 +15812,9 @@ int main() {
                                            "jumping + sending VU",
                                            nextPlayer->id, m.id );
 
+                            // 记下跟随目标,供地图发送块据此把观众地图对齐主播
+                            nextPlayer->liveViewTargetID = m.id;
+
                             GridPos o = getPlayerPos( targetPlayer );
                             GridPos oldPos = getPlayerPos( nextPlayer );
 
@@ -15837,6 +15846,7 @@ int main() {
                     if( nextPlayer->liveViewMode ) {
                         nextPlayer->vogMode = false;
                         nextPlayer->liveViewMode = false;
+                        nextPlayer->liveViewTargetID = -1;
 
                         GridPos p = nextPlayer->preVogPos;
                         nextPlayer->xd = p.x;
@@ -23842,14 +23852,28 @@ int main() {
                 int chunkDimensionX = nextPlayer->mMapD / 2;
                 int chunkDimensionY = chunkDimensionX - 2;
                 if( nextPlayer->heldByOther ) {
-                    LiveObject *holdingPlayer = 
+                    LiveObject *holdingPlayer =
                         getLiveObject( nextPlayer->heldByOtherID );
-                
+
                     if( holdingPlayer != NULL ) {
                         playerXD = holdingPlayer->xd;
                         playerYD = holdingPlayer->yd;
                     }
                 }
+                // 直播观察:观众地图发送位置跟随主播,使增量 MC 围绕主播实时加载
+                // (LVOF 后观众 xd/yd 冻结,主播移动不再触发新 MC;此处把主播当前
+                //  位置作为地图中心,主播走到哪加载到哪,与主播本人视野一致)
+                char liveViewFollowing = false;
+                if( nextPlayer->liveViewMode &&
+                    nextPlayer->liveViewTargetID >= 0 ) {
+                    LiveObject *lvTarget =
+                        getLiveObject( nextPlayer->liveViewTargetID );
+                    if( lvTarget != NULL && ! lvTarget->error ) {
+                        playerXD = lvTarget->xd;
+                        playerYD = lvTarget->yd;
+                        liveViewFollowing = true;
+                        }
+                    }
                 //printf("playerXD: %d, lastSentMapX: %d\n", playerXD, nextPlayer->lastSentMapX);
 
                 //printf("playerYD: %d, lastSentMapY: %d\n", playerYD, nextPlayer->lastSentMapY);
@@ -23864,8 +23888,9 @@ int main() {
                     // or player flagged as needing first map again
                     
                     sendMapChunkMessage( nextPlayer,
-                                         // override if held
-                                         nextPlayer->heldByOther,
+                                         // override if held or liveView-following
+                                         nextPlayer->heldByOther ||
+                                             liveViewFollowing,
                                          playerXD,
                                          playerYD );
 
