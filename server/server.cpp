@@ -15752,6 +15752,11 @@ int main() {
                 // 白名单,若不阻断,任何人都能借 LVOS 拿 vogMode 后调 VOGI 放物,
                 // 绕过 VOG 白名单。公开后此守卫更必需。
                 else if( m.type == LVOS ) {
+                    AppLog::infoF( "LVO: LVOS p=%d connected=%d vogMode=%d "
+                                   "liveViewMode=%d", nextPlayer->id,
+                                   (int)nextPlayer->connected,
+                                   (int)nextPlayer->vogMode,
+                                   (int)nextPlayer->liveViewMode );
                     if( nextPlayer->connected &&
                         ! nextPlayer->vogMode ) {
                         nextPlayer->vogMode = true;
@@ -15760,6 +15765,8 @@ int main() {
                         nextPlayer->preVogBirthPos = nextPlayer->birthPos;
                         nextPlayer->foodStore =
                             computeFoodCapacity( nextPlayer );
+                        AppLog::infoF( "LVO: LVOS OK p=%d, entered liveView",
+                                       nextPlayer->id );
                         }
                     }
                 // LVOF p_id:跳转/跟随指定主播(p_id 在解析时存入 m.id,
@@ -15768,12 +15775,29 @@ int main() {
                 // 公开的主播,不能跳到未开直播的玩家。一次性跳转,持续跟随需
                 // 客户端周期性重发 LVOF。
                 else if( m.type == LVOF ) {
+                    AppLog::infoF( "LVO: LVOF p=%d target=%d liveViewMode=%d",
+                                   nextPlayer->id, m.id,
+                                   (int)nextPlayer->liveViewMode );
                     if( nextPlayer->liveViewMode ) {
                         LiveObject *targetPlayer = getLiveObject( m.id );
+                        if( targetPlayer != NULL ) {
+                            AppLog::infoF( "LVO: LVOF target=%d found=Y "
+                                           "error=%d vogMode=%d streaming=%d",
+                                           m.id, (int)targetPlayer->error,
+                                           (int)targetPlayer->vogMode,
+                                           (int)targetPlayer->streaming );
+                            }
+                        else {
+                            AppLog::infoF( "LVO: LVOF target=%d found=N "
+                                           "(not in players list)", m.id );
+                            }
                         if( targetPlayer != NULL &&
                             ! targetPlayer->error &&
                             ! targetPlayer->vogMode &&
                             targetPlayer->streaming ) {
+                            AppLog::infoF( "LVO: LVOF OK p=%d -> target=%d, "
+                                           "jumping + sending VU",
+                                           nextPlayer->id, m.id );
 
                             GridPos o = getPlayerPos( targetPlayer );
                             GridPos oldPos = getPlayerPos( nextPlayer );
