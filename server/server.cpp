@@ -2345,10 +2345,31 @@ ClientMessage parseMessage( LiveObject *inPlayer, char *inMessage ) {
 
     if( numRead != 3 ) {
         
+        if( numRead == 0 ) {
+            // 无参数消息(LVOS/LVOX)没有空格,上面的解析不会给 nameBuffer
+            // 赋值(栈垃圾),这里补上以命中下面的 strcmp。
+            strncpy( nameBuffer, inMessage, 99 );
+            nameBuffer[99] = '\0';
+            }
+
         if( numRead == 2 &&
             strcmp( nameBuffer, "TRIGGER" ) == 0 ) {
             m.type = TRIGGER;
             m.trigger = m.x;
+            }
+        // ---- LVO 直播观察(numRead<3,必须在此处理)----
+        // LVOS/LVOX 无参数(numRead==0);LVOF p_id 一空格(numRead==2)。
+        // 切勿放下面 numRead==3 的 strcmp 链 —— 会被本块 UNKNOWN 兜底吞掉
+        // (表现为服务端日志 "unknown message type")。
+        else if( strcmp( nameBuffer, "LVOS" ) == 0 ) {
+            m.type = LVOS;
+            }
+        else if( strcmp( nameBuffer, "LVOF" ) == 0 ) {
+            m.type = LVOF;
+            sscanf( inMessage, "%99s %d", nameBuffer, &( m.id ) );
+            }
+        else if( strcmp( nameBuffer, "LVOX" ) == 0 ) {
+            m.type = LVOX;
             }
         else {
             m.type = UNKNOWN;
@@ -2637,21 +2658,7 @@ ClientMessage parseMessage( LiveObject *inPlayer, char *inMessage ) {
     else if( strcmp( nameBuffer, "VOGX" ) == 0 ) {
         m.type = VOGX;
         }
-    // ---- LIVE 直播观察协议(只读旁观)----
-    // LVOS/LVOX 仅设类型;LVOF 单独 sscanf 读玩家 id 到 m.id
-    // (避开通用 m.x 的 birthPos 坐标转换污染)。
-    else if( strcmp( nameBuffer, "LVOS" ) == 0 ) {
-        m.type = LVOS;
-        }
-    else if( strcmp( nameBuffer, "LVOF" ) == 0 ) {
-        // LVOF <p_id>:p_id 是玩家 id 不是坐标,单独读入 m.id,
-        // 避开通用 m.x 经 birthPos 坐标转换被污染(通用 m.x 仍被填但 LVOF 不用它)
-        m.type = LVOF;
-        sscanf( inMessage, "%99s %d", nameBuffer, &( m.id ) );
-        }
-    else if( strcmp( nameBuffer, "LVOX" ) == 0 ) {
-        m.type = LVOX;
-        }
+   // 注:LVO(LVOS/LVOF/LVOX)解析在上方 numRead!=3 块处理(参数数<3)。
    else if( strcmp( nameBuffer, "PHOTO" ) == 0 ) {
         m.type = PHOTO;
         numRead = sscanf( inMessage, 
