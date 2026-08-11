@@ -939,6 +939,10 @@ typedef struct LiveObject {
         char holdingFlightObject;
         
         char vogMode;
+        // LIVE 直播观察模式(只读旁观,管理员用)。进入时 vogMode=true
+        // (复用既有免疫/不可见/场景接收守卫)+ liveViewMode=true(标记只读:
+        // 阻断 VOG* 写命令,只响应 LVO* 命令)。与 VOG 上帝模式权限分离。
+        char liveViewMode;
         GridPos preVogPos;
         GridPos preVogBirthPos;
         int vogJumpIndex;
@@ -2218,6 +2222,10 @@ typedef enum messageType {
     VOGI,
     VOGT,
     VOGX,
+    // LIVE 直播观察协议(只读旁观,与 VOG 上帝模式权限分离,不复用 VOG 接口)
+    LVOS,
+    LVOF,
+    LVOX,
     PHOTO,
     FLIP,
     UNKNOWN
@@ -2628,6 +2636,21 @@ ClientMessage parseMessage( LiveObject *inPlayer, char *inMessage ) {
         }
     else if( strcmp( nameBuffer, "VOGX" ) == 0 ) {
         m.type = VOGX;
+        }
+    // ---- LIVE 直播观察协议(只读旁观)----
+    // LVOS/LVOX 仅设类型;LVOF 单独 sscanf 读玩家 id 到 m.id
+    // (避开通用 m.x 的 birthPos 坐标转换污染)。
+    else if( strcmp( nameBuffer, "LVOS" ) == 0 ) {
+        m.type = LVOS;
+        }
+    else if( strcmp( nameBuffer, "LVOF" ) == 0 ) {
+        // LVOF <p_id>:p_id 是玩家 id 不是坐标,单独读入 m.id,
+        // 避开通用 m.x 经 birthPos 坐标转换被污染(通用 m.x 仍被填但 LVOF 不用它)
+        m.type = LVOF;
+        sscanf( inMessage, "%99s %d", nameBuffer, &( m.id ) );
+        }
+    else if( strcmp( nameBuffer, "LVOX" ) == 0 ) {
+        m.type = LVOX;
         }
    else if( strcmp( nameBuffer, "PHOTO" ) == 0 ) {
         m.type = PHOTO;
@@ -8300,6 +8323,7 @@ int processLoggedInPlayer( char inAllowReconnect,
     newObject.holdingFlightObject = false;
 
     newObject.vogMode = false;
+    newObject.liveViewMode = false;
     newObject.postVogMode = false;
     newObject.vogJumpIndex = 0;
     
@@ -15522,7 +15546,8 @@ int main() {
                         }
                     
 
-                    if( allow && nextPlayer->connected ) {
+                    if( allow && nextPlayer->connected &&
+                        ! nextPlayer->liveViewMode ) {
                         nextPlayer->vogMode = true;
                         nextPlayer->preVogPos = getPlayerPos( nextPlayer );
                         nextPlayer->preVogBirthPos = nextPlayer->birthPos;
@@ -15531,6 +15556,7 @@ int main() {
                     }
                 else if( m.type == VOGN ) {
                     if( nextPlayer->vogMode &&
+                        ! nextPlayer->liveViewMode &&
                         players.size() > 1 ) {
                         
                         nextPlayer->vogJumpIndex++;
@@ -15579,6 +15605,7 @@ int main() {
                     }
                 else if( m.type == VOGP ) {
                     if( nextPlayer->vogMode &&
+                        ! nextPlayer->liveViewMode &&
                         players.size() > 1 ) {
 
                         nextPlayer->vogJumpIndex--;
@@ -15634,7 +15661,7 @@ int main() {
                         }
                     }
                 else if( m.type == VOGM ) {
-                    if( nextPlayer->vogMode ) {
+                    if( nextPlayer->vogMode && ! nextPlayer->liveViewMode ) {
                         nextPlayer->xd = m.x;
                         nextPlayer->yd = m.y;
                         
@@ -15653,7 +15680,7 @@ int main() {
                         }
                     }
                 else if( m.type == VOGI ) {
-                    if( nextPlayer->vogMode ) {
+                    if( nextPlayer->vogMode && ! nextPlayer->liveViewMode ) {
                         if( m.id > 0 &&
                             getObject( m.id ) != NULL ) {
                             
@@ -15667,7 +15694,7 @@ int main() {
                         }
                     }
                 else if( m.type == VOGT && m.saidText != NULL ) {
-                    if( nextPlayer->vogMode ) {
+                    if( nextPlayer->vogMode && ! nextPlayer->liveViewMode ) {
                         
                         newLocationSpeech.push_back( 
                             stringDuplicate( m.saidText ) );
@@ -15683,7 +15710,7 @@ int main() {
                         }
                     }
                 else if( m.type == VOGX ) {
-                    if( nextPlayer->vogMode ) {
+                    if( nextPlayer->vogMode && ! nextPlayer->liveViewMode ) {
                         nextPlayer->vogMode = false;
                         
                         // If they send VOGX with coords other than (0, 0), teleport them
@@ -15716,8 +15743,93 @@ int main() {
                         nextPlayer->firstMapSent = false;
                         }
                     }
+                // ---- LIVE 直播观察协议(LVO*,只读旁观,公开观看)----
+                // 直播是公开的:任何已登录玩家都可 LVOS 进入观察模式,观看
+                // 已开直播(streaming=true)的主播,无白名单。主播侧用 streaming
+                // 标记 opt-in 公开(LVOF 校验目标须 streaming)。
+                // liveViewMode 阻断全部 VOG* 写命令 —— 这不是管理员隔离,而是
+                // 安全护栏:VOGI 等写命令执行时只查 vogMode、不复查 vogAllowAccounts
+                // 白名单,若不阻断,任何人都能借 LVOS 拿 vogMode 后调 VOGI 放物,
+                // 绕过 VOG 白名单。公开后此守卫更必需。
+                else if( m.type == LVOS ) {
+                    if( nextPlayer->connected &&
+                        ! nextPlayer->vogMode ) {
+                        nextPlayer->vogMode = true;
+                        nextPlayer->liveViewMode = true;
+                        nextPlayer->preVogPos = getPlayerPos( nextPlayer );
+                        nextPlayer->preVogBirthPos = nextPlayer->birthPos;
+                        nextPlayer->foodStore =
+                            computeFoodCapacity( nextPlayer );
+                        }
+                    }
+                // LVOF p_id:跳转/跟随指定主播(p_id 在解析时存入 m.id,
+                // 避开通用 m.x 的 birthPos 坐标转换污染)。目标必须是已开直播
+                // (streaming=true)的玩家 —— 直播公开观看的边界:只看 opt-in
+                // 公开的主播,不能跳到未开直播的玩家。一次性跳转,持续跟随需
+                // 客户端周期性重发 LVOF。
+                else if( m.type == LVOF ) {
+                    if( nextPlayer->liveViewMode ) {
+                        LiveObject *targetPlayer = getLiveObject( m.id );
+                        if( targetPlayer != NULL &&
+                            ! targetPlayer->error &&
+                            ! targetPlayer->vogMode &&
+                            targetPlayer->streaming ) {
+
+                            GridPos o = getPlayerPos( targetPlayer );
+                            GridPos oldPos = getPlayerPos( nextPlayer );
+
+                            nextPlayer->xd = o.x;
+                            nextPlayer->yd = o.y;
+                            nextPlayer->xs = o.x;
+                            nextPlayer->ys = o.y;
+
+                            if( distance( oldPos, o ) > 10000 ) {
+                                nextPlayer->birthPos = o;
+                                }
+
+                            char *message = autoSprintf( "VU\n%d %d\n#",
+                                                         nextPlayer->xs -
+                                                         nextPlayer->birthPos.x,
+                                                         nextPlayer->ys -
+                                                         nextPlayer->birthPos.y );
+                            sendMessageToPlayer( nextPlayer, message,
+                                                 strlen( message ) );
+                            delete [] message;
+
+                            nextPlayer->firstMessageSent = false;
+                            nextPlayer->firstMapSent = false;
+                            }
+                        }
+                    }
+                // LVOX:退出直播观察,恢复进入前位置与 birthPos。
+                else if( m.type == LVOX ) {
+                    if( nextPlayer->liveViewMode ) {
+                        nextPlayer->vogMode = false;
+                        nextPlayer->liveViewMode = false;
+
+                        GridPos p = nextPlayer->preVogPos;
+                        nextPlayer->xd = p.x;
+                        nextPlayer->yd = p.y;
+                        nextPlayer->xs = p.x;
+                        nextPlayer->ys = p.y;
+                        nextPlayer->birthPos = nextPlayer->preVogBirthPos;
+
+                        char *message = autoSprintf( "VU\n%d %d\n#",
+                                                     nextPlayer->xs -
+                                                     nextPlayer->birthPos.x,
+                                                     nextPlayer->ys -
+                                                     nextPlayer->birthPos.y );
+                        sendMessageToPlayer( nextPlayer, message,
+                                             strlen( message ) );
+                        delete [] message;
+
+                        nextPlayer->postVogMode = true;
+                        nextPlayer->firstMessageSent = false;
+                        nextPlayer->firstMapSent = false;
+                        }
+                    }
                 else if( nextPlayer->vogMode ) {
-                    // ignore non-VOG messages from them
+                    // ignore non-VOG/non-LVO messages from observer-mode players
                     }
                 else if( m.type == FORCE ) {
                     if( m.x == nextPlayer->xd &&
