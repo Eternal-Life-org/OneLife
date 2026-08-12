@@ -299,13 +299,6 @@ void temp_passwordRecordTransfer() {
     }    
 
 
-static SimpleVector<char*> infertilityDeclaringPhrases;
-static SimpleVector<char*> fertilityDeclaringPhrases;
-
-// 直播开启指令短语 (无参, 前缀匹配, 仿 infertilityDeclaring; 触发词见 settings/liveStreamEnablingPhrases.ini)
-static SimpleVector<char*> liveStreamEnablingPhrases;
-
-
 
 
 static char *eveName = NULL;
@@ -921,7 +914,7 @@ typedef struct LiveObject {
         
         bool declaredInfertile;
 
-        // 直播 opt-in: 玩家说"开启直播"指令后置 true, 非持久, 每条命重置
+        // 直播 opt-in: 玩家发 STREAM 协议后置 true(只开不关), 非持久, 每条命重置
         // (仅 LIVE_STREAM 外部查询可见, 场内不广播名字)
         bool streaming;
 
@@ -1947,10 +1940,7 @@ void quitCleanup() {
     
     youGivingPhrases.deallocateStringElements();
     namedGivingPhrases.deallocateStringElements();
-    infertilityDeclaringPhrases.deallocateStringElements();
-    fertilityDeclaringPhrases.deallocateStringElements();
-    liveStreamEnablingPhrases.deallocateStringElements();
-    
+
     // password-protected objects
     passwordProtectingPhrases.deallocateStringElements();
     
@@ -2230,6 +2220,10 @@ typedef enum messageType {
     LVOS,
     LVOF,
     LVOX,
+    // 直播开关 + 生育声明(独立协议,不再复用 SAY 关键词)
+    STREAM,
+    INFERTILE,
+    FERTILE,
     PHOTO,
     FLIP,
     UNKNOWN
@@ -2350,8 +2344,8 @@ ClientMessage parseMessage( LiveObject *inPlayer, char *inMessage ) {
     if( numRead != 3 ) {
         
         if( numRead == 0 ) {
-            // 无参数消息(LVOS/LVOX)没有空格,上面的解析不会给 nameBuffer
-            // 赋值(栈垃圾),这里补上以命中下面的 strcmp。
+            // 无参数消息(LVOS/LVOX/STREAM/INFERTILE/FERTILE)没有空格,上面的解析
+            // 不会给 nameBuffer 赋值(栈垃圾),这里补上以命中下面的 strcmp。
             strncpy( nameBuffer, inMessage, 99 );
             nameBuffer[99] = '\0';
             }
@@ -2375,10 +2369,22 @@ ClientMessage parseMessage( LiveObject *inPlayer, char *inMessage ) {
         else if( strcmp( nameBuffer, "LVOX" ) == 0 ) {
             m.type = LVOX;
             }
+        // ---- 直播开关 + 生育声明(0 参,必须在此 numRead!=3 块处理)----
+        // STREAM/INFERTILE/FERTILE 均无参数(numRead==0)。
+        // 切勿放下面 numRead==3 的 strcmp 链 —— 会被本块 UNKNOWN 兜底吞掉。
+        else if( strcmp( nameBuffer, "STREAM" ) == 0 ) {
+            m.type = STREAM;
+            }
+        else if( strcmp( nameBuffer, "INFERTILE" ) == 0 ) {
+            m.type = INFERTILE;
+            }
+        else if( strcmp( nameBuffer, "FERTILE" ) == 0 ) {
+            m.type = FERTILE;
+            }
         else {
             m.type = UNKNOWN;
             }
-        
+
         return m;
         }
     
@@ -5107,10 +5113,6 @@ SimpleVector<ChangePosition> newLocationSpeechPos;
 
 char *isCurseNamingSay( char *inSaidString );
 
-char *isInfertilityDeclaringSay( char *inSaidString );
-
-char *isFertilityDeclaringSay( char *inSaidString );
-
 
 // password-protected objects
 char *isPasswordProtectingSay( char *inSaidString );
@@ -5144,13 +5146,6 @@ static void makePlayerSay( LiveObject *inPlayer, char *inToSay, bool inPrivate =
             }
         inPlayer->lastSay = stringDuplicate( inToSay );
         }
-
-
-    if( getFemale( inPlayer ) ) {
-        char *infertilityDeclaring = isInfertilityDeclaringSay( inToSay );
-        char *fertilityDeclaring = isFertilityDeclaringSay( inToSay );
-        if( infertilityDeclaring != NULL || fertilityDeclaring != NULL ) return;
-    }
 
 
     char isCurse = false;
@@ -10675,21 +10670,6 @@ char *isNamedGivingSay( char *inSaidString ) {
     return isReverseNamingSay( inSaidString, &namedGivingPhrases );
     }
 
-char *isInfertilityDeclaringSay( char *inSaidString ) {
-    return isNamingSay( inSaidString, &infertilityDeclaringPhrases );
-    }
-
-char *isFertilityDeclaringSay( char *inSaidString ) {
-    return isNamingSay( inSaidString, &fertilityDeclaringPhrases );
-    }
-
-
-// 直播开启指令检测 (前缀匹配, 仿 isInfertilityDeclaringSay; 忽略返回的"名字"参数)
-// 玩家在 SAY 中说 "开启直播" -> isNamingSay 前缀命中即返回非 NULL
-char *isLiveStreamEnablingSay( char *inSaidString ) {
-    return isNamingSay( inSaidString, &liveStreamEnablingPhrases );
-    }
-
 
 
 static char isWildcardGivingSay( char *inSaidString,
@@ -13011,12 +12991,8 @@ int main() {
     
     // password-protected objects
     readPhrases( "passwordProtectingPhrases", &passwordProtectingPhrases );
-    
-    readPhrases( "infertilityDeclaringPhrases", &infertilityDeclaringPhrases );
-    readPhrases( "fertilityDeclaringPhrases", &fertilityDeclaringPhrases );
-    readPhrases( "liveStreamEnablingPhrases", &liveStreamEnablingPhrases );
 
-    eveName = 
+    eveName =
         SettingsManager::getStringSetting( "eveName", "EVE" );
     infertilitySuffix = 
         SettingsManager::getStringSetting( "infertilitySuffix", "+INFERTILE+" );
@@ -15893,9 +15869,58 @@ int main() {
                     // immediately send pong
                     char *message = autoSprintf( "PONG\n%d#", m.id );
 
-                    sendMessageToPlayer( nextPlayer, message, 
+                    sendMessageToPlayer( nextPlayer, message,
                                          strlen( message ) );
                     delete [] message;
+                    }
+                else if( m.type == STREAM ) {
+                    // 直播 opt-in:置 streaming=true(只开不关,静默,非持久)。
+                    // 独立协议,不经 SAY 的 1 秒限流/年龄截断。
+                    if( ! nextPlayer->streaming ) {
+                        nextPlayer->streaming = true;
+                        }
+                    }
+                else if( m.type == INFERTILE || m.type == FERTILE ) {
+                    // 生育声明(仅女性,与旧 SAY 关键词版语义一致)。
+                    if( getFemale( nextPlayer ) ) {
+                        if( m.type == INFERTILE &&
+                            ! nextPlayer->declaredInfertile ) {
+                            nextPlayer->declaredInfertile = true;
+
+                            if( nextPlayer->displayedName != NULL ) {
+                                delete [] nextPlayer->displayedName;
+                                }
+                            if( nextPlayer->name == NULL ) {
+                                nextPlayer->displayedName =
+                                    stringDuplicate( infertilitySuffix );
+                                }
+                            else {
+                                nextPlayer->displayedName = autoSprintf(
+                                    "%s %s", nextPlayer->name,
+                                    infertilitySuffix );
+                                }
+
+                            playerIndicesToSendNamesAbout.push_back( i );
+                            }
+                        else if( m.type == FERTILE &&
+                                 nextPlayer->declaredInfertile ) {
+                            nextPlayer->declaredInfertile = false;
+
+                            if( nextPlayer->displayedName != NULL ) {
+                                delete [] nextPlayer->displayedName;
+                                }
+                            if( nextPlayer->name == NULL ) {
+                                nextPlayer->displayedName =
+                                    stringDuplicate( fertilitySuffix );
+                                }
+                            else {
+                                nextPlayer->displayedName =
+                                    stringDuplicate( nextPlayer->name );
+                                }
+
+                            playerIndicesToSendNamesAbout.push_back( i );
+                            }
+                        }
                     }
                 else if( m.type == DIE ) {
                     if( computeAge( nextPlayer ) < 2 ) {
@@ -17104,44 +17129,6 @@ int main() {
                                 playerIndicesToSendNamesAbout.push_back( i );
                                 }
                             }
-                        
-                        if( getFemale( nextPlayer ) ) {
-                            char *infertilityDeclaring = isInfertilityDeclaringSay( m.saidText );
-                            char *fertilityDeclaring = isFertilityDeclaringSay( m.saidText );
-                            if( infertilityDeclaring != NULL && !nextPlayer->declaredInfertile ) {
-                                nextPlayer->declaredInfertile = true;
-                                
-                                if ( nextPlayer->displayedName != NULL ) delete [] nextPlayer->displayedName;
-                                if (nextPlayer->name == NULL) {
-                                    nextPlayer->displayedName = stringDuplicate( infertilitySuffix );
-                                } else {
-                                    nextPlayer->displayedName = autoSprintf( "%s %s", nextPlayer->name, infertilitySuffix);
-                                }
-                                
-                                playerIndicesToSendNamesAbout.push_back( i );
-                                
-                            } else if( fertilityDeclaring != NULL && nextPlayer->declaredInfertile ) {
-                                nextPlayer->declaredInfertile = false;
-                                
-                                if ( nextPlayer->displayedName != NULL ) delete [] nextPlayer->displayedName;
-                                if (nextPlayer->name == NULL) {
-                                    nextPlayer->displayedName = stringDuplicate( fertilitySuffix );
-                                } else {
-                                    nextPlayer->displayedName = stringDuplicate( nextPlayer->name );
-                                }
-                                
-                                playerIndicesToSendNamesAbout.push_back( i );
-                            }
-                        }
-                        
-
-                        // 直播 opt-in: 说"开启直播"即标记直播中 (只开不关, 静默, 非持久)
-                        // 不限性别; 不改 displayedName / 不广播 (仅 LIVE_STREAM 外部查询可见)
-                        if( !nextPlayer->streaming &&
-                            isLiveStreamEnablingSay( m.saidText ) != NULL ) {
-                            nextPlayer->streaming = true;
-                            }
-
                         
                         LiveObject *otherToForgive = NULL;
                         
