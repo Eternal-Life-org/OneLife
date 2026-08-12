@@ -547,6 +547,9 @@ typedef struct FreshConnection {
         char playerListSent;
         char liveStreamSent;
 
+        // LVO 直播观察:经 LVOLOGIN 登录时,要观看的主播 p_id(<0 表示普通 LOGIN)。
+        int liveViewTargetID;
+
         int mMapD;
     } FreshConnection;
 
@@ -940,6 +943,9 @@ typedef struct LiveObject {
         // 发送位置持续对齐到主播,使增量 MC 围绕主播实时加载(否则观众 xd/yd
         // 仅在 LVOF 时设一次,主播走远后地图不再加载)。
         int liveViewTargetID;
+        // 经 LVOLOGIN 进入的纯旁观者标记:永不可经 LVOX 变回普通玩家,
+        // 断连即删(无重返价值)。区别于 liveViewMode(管理员 LVOS 进入可 LVOX 退出)。
+        char spectator;
         GridPos preVogPos;
         GridPos preVogBirthPos;
         int vogJumpIndex;
@@ -4020,6 +4026,11 @@ SimpleVector<MoveRecord> getMoveRecords(
             continue;
             }
 
+        // 旁观者(vogMode)永不移动,排除以免把它的坐标作为 PM 源泄漏给他人。
+        if( o->vogMode ) {
+            continue;
+            }
+
         if( ( o->xd != o->xs || o->yd != o->ys )
             &&
             ( o->newMove || !inNewMovesOnly ) ) {
@@ -4233,6 +4244,32 @@ static void setPlayerDisconnected( LiveObject *inPlayer,
 
     AppLog::infoF( "Player %d (%s) marked as disconnected (%s) in func (%s:%d)",
                    inPlayer->id, inPlayer->email, inReason, func, line );
+
+    // 旁观者无重返价值:断连即标记 error+deleteSent,由 despawn 块本帧/下帧移除;
+    // 跳过下面的 vogMode 清零与 preVogPos 回滚(那是管理员 god-mode 退出用的,
+    // 旁观者回滚会把它丢到 preVogPos 泄漏)。deleteSent=true 同时跳过 delete-PU
+    // 广播块(需 !deleteSent),避免把旁观者的"死亡"广播给所有客户端。
+    if( inPlayer->spectator ) {
+        inPlayer->connected = false;
+        inPlayer->error = true;
+        inPlayer->errorCauseString = inReason;
+        inPlayer->deleteSent = true;
+        inPlayer->deleteSentDoneETA = Time::getCurrentTime();
+        inPlayer->deathTimeSeconds = Time::getCurrentTime();
+
+        if( inPlayer->sock != NULL ) {
+            sockPoll.removeSocket( inPlayer->sock );
+            delete inPlayer->sock;
+            inPlayer->sock = NULL;
+            }
+        if( inPlayer->sockBuffer != NULL ) {
+            delete inPlayer->sockBuffer;
+            inPlayer->sockBuffer = NULL;
+            }
+        return;
+        }
+
+    // just mark them as not connected
     inPlayer->connected = false;
 
     // when player reconnects, they won't get a force PU message
@@ -6616,7 +6653,13 @@ static LiveObject *getHitPlayer( int inX, int inY,
         if( otherPlayer->error ) {
             continue;
             }
-        
+
+        // 旁观者(vogMode)贴在主播格,不可被攻击/野兽命中,否则会触发 delete-PU
+        // 广播(21150)把旁观者泄漏给所有客户端。
+        if( otherPlayer->vogMode ) {
+            continue;
+            }
+
         if( otherPlayer->heldByOther ) {
             // ghost position of a held baby
             continue;
@@ -8331,6 +8374,7 @@ int processLoggedInPlayer( char inAllowReconnect,
     newObject.vogMode = false;
     newObject.liveViewMode = false;
     newObject.liveViewTargetID = -1;
+    newObject.spectator = false;
     newObject.postVogMode = false;
     newObject.vogJumpIndex = 0;
     
@@ -8642,6 +8686,106 @@ int processLoggedInPlayer( char inAllowReconnect,
                    inTutorialNumber, a->mAddressString, seed, newObject.xs, newObject.ys,
                    maxPlacementX );
     
+    return newObject.id;
+    }
+
+
+
+// LVO 直播旁观登录(LVOLOGIN):鉴权同普通登录(已在调用前完成),但不出生玩家本体。
+// 造一个「从出生第一帧即 vogMode+liveViewMode」的只读 LiveObject:
+//   - vogMode 在 push 前置位 → 首条 PU 源过滤(23331)与每帧 PU 过滤(22798)必跳过它
+//     → 永不发自 PU、永不被广播给任何人;
+//   - 仍在 players 内 → 接收侧主循环(23241,无 vogMode 过滤)照常给它发主播视野
+//     (map-send 锚定 liveViewTargetID、PU 距离以主播坐标为准);
+//   - spectator 标记:断连即删、不可经 LVOX 变回普通玩家。
+// 不做正常出生/母职/族谱/Eve/tutorial,故不计入名额(见 maxPlayers 计数)、不消耗生命。
+static int processLiveViewSpectator( Socket *inSock,
+                                     SimpleVector<char> *inSockBuffer,
+                                     char *inEmail,
+                                     FreshConnection *connection,
+                                     int inLiveViewTargetID ) {
+
+    // 校验目标主播:在线、非错误、非旁观、已开直播(streaming)。
+    LiveObject *target = getLiveObject( inLiveViewTargetID );
+    if( target == NULL || target->error || target->vogMode ||
+        ! target->streaming ) {
+        AppLog::infoF( "LVO: LVOLOGIN target=%d invalid "
+                       "(missing/error/vog/!streaming), rejected",
+                       inLiveViewTargetID );
+        const char *rej = "REJECTED\n#";
+        inSock->send( (unsigned char*)rej, strlen( rej ), false, false );
+        return -1;
+        }
+
+    // 值初始化:标量归零、指针 NULL、SimpleVector 成员默认构造;再显式设全。
+    LiveObject newObject = {};
+
+    newObject.id = nextID;
+    nextID++;
+
+    newObject.email = stringDuplicate( inEmail );
+    newObject.origEmail = NULL;
+    newObject.displayID = getRandomPersonObject();
+
+    newObject.vogMode = true;
+    newObject.liveViewMode = true;
+    newObject.spectator = true;
+    newObject.liveViewTargetID = target->id;
+    newObject.connected = true;
+    newObject.error = false;
+    newObject.deleteSent = false;
+    newObject.isEve = false;
+    newObject.isTutorial = false;
+    newObject.lineageEveID = newObject.id;
+    newObject.parentID = -1;
+    newObject.curseStatus = connection->curseStatus;
+    newObject.lifeStats = connection->lifeStats;
+    newObject.fitnessScore = connection->fitnessScore;
+
+    newObject.mMapD = target->mMapD;
+
+    // 位置/出生点对齐主播(出生相对坐标以此为原点,与 PU/MC 坐标系一致)。
+    GridPos p = getPlayerPos( target );
+    newObject.xd = p.x;
+    newObject.yd = p.y;
+    newObject.xs = p.x;
+    newObject.ys = p.y;
+    newObject.birthPos = p;
+    newObject.originalBirthPos = p;
+    newObject.preVogPos = p;
+    newObject.preVogBirthPos = p;
+    newObject.actionTarget = p;
+
+    // vogMode 免食物衰减,此值永不外发(无自 PU/FX),仅占位。
+    newObject.foodStore = 20;
+
+    newObject.lifeStartTimeSeconds = Time::getCurrentTime();
+    newObject.trueStartTimeSeconds = Time::getCurrentTime();
+    newObject.deathTimeSeconds = 0;
+
+    newObject.sock = inSock;
+    newObject.sockBuffer = inSockBuffer;
+    newObject.firstMessageSent = false;
+    newObject.firstMapSent = false;
+
+    // despawn 清理路径(25300-25360)无条件 delete 的指针成员,必须分配。
+    newObject.lineage = new SimpleVector<int>();
+    newObject.ancestorIDs = new SimpleVector<int>();
+    newObject.ancestorEmails = new SimpleVector<char*>();
+    newObject.ancestorRelNames = new SimpleVector<char*>();
+    newObject.ancestorLifeStartTimeSeconds = new SimpleVector<double>();
+    newObject.ancestorLifeEndTimeSeconds = new SimpleVector<double>();
+    newObject.babyBirthTimes = new SimpleVector<timeSec_t>();
+    newObject.babyIDs = new SimpleVector<int>();
+
+    players.push_back( newObject );
+
+    HostAddress *a = inSock->getRemoteHostAddress();
+    AppLog::infoF( "LVO: spectator %s connected as player %d "
+                   "(liveView target=%d, IP:%s) — no world body, no slot",
+                   newObject.email, newObject.id, target->id,
+                   a->mAddressString );
+
     return newObject.id;
     }
 
@@ -13756,6 +13900,9 @@ int main() {
                 newConnection.curseStatus.curseLevel = 0;
                 newConnection.curseStatus.excessPoints = 0;
 
+                // 默认普通 LOGIN;LVOLOGIN 解析时会覆盖为要观看的主播 id。
+                newConnection.liveViewTargetID = -1;
+
                 newConnection.twinCode = NULL;
                 newConnection.twinCount = 0;
                 
@@ -13770,7 +13917,15 @@ int main() {
                 int maxPlayers = 
                     SettingsManager::getIntSetting( "maxPlayers", 200 );
                 
-                int currentPlayers = players.size() + newConnections.size();
+                int currentPlayers = newConnections.size();
+                // 旁观者(liveViewMode)不计入名额:它们不占玩家空间,也不应
+                // 把服务器顶满导致正常玩家被拒。此数同时用于 SN 横幅(reflector
+                // 在线数)与 >=maxPlayers 拒绝判定。
+                for( int pi = 0; pi < players.size(); pi++ ) {
+                    if( ! players.getElement( pi )->liveViewMode ) {
+                        currentPlayers++;
+                        }
+                    }
                     
 
                 if( apocalypseTriggered || shutdownMode ) {
@@ -14061,24 +14216,42 @@ int main() {
                             nextConnection->twinCode = NULL;
                             }
                                 
-                        int newID = processLoggedInPlayer( 
-                            true,
-                            nextConnection->sock,
-                            nextConnection->sockBuffer,
-                            nextConnection->email,
-                            nextConnection,
-                            nextConnection->tutorialNumber,
-                            nextConnection->curseStatus,
-                            nextConnection->lifeStats,
-                            nextConnection->fitnessScore );
-                            
-                        if( newID == -2 ) {
-                            nextConnection->error = true;
-                            nextConnection->errorCauseString =
-                                "Target family is not found or does not have fertiles";
-                            // Do not remove this connection
-                            // we need to notify them about the famTarget failure
-                            removeConnectionFromList = false;
+                        int newID;
+                        if( nextConnection->liveViewTargetID >= 0 ) {
+                            // LVOLOGIN 直播旁观:鉴权同普通登录,但不出生玩家本体,
+                            // 改造为从出生即 vogMode 的只读 LiveObject。
+                            newID = processLiveViewSpectator(
+                                nextConnection->sock,
+                                nextConnection->sockBuffer,
+                                nextConnection->email,
+                                nextConnection,
+                                nextConnection->liveViewTargetID );
+                            if( newID == -1 ) {
+                                nextConnection->error = true;
+                                nextConnection->errorCauseString =
+                                    "Invalid live stream target";
+                                }
+                            }
+                        else {
+                            newID = processLoggedInPlayer(
+                                true,
+                                nextConnection->sock,
+                                nextConnection->sockBuffer,
+                                nextConnection->email,
+                                nextConnection,
+                                nextConnection->tutorialNumber,
+                                nextConnection->curseStatus,
+                                nextConnection->lifeStats,
+                                nextConnection->fitnessScore );
+
+                            if( newID == -2 ) {
+                                nextConnection->error = true;
+                                nextConnection->errorCauseString =
+                                    "Target family is not found or does not have fertiles";
+                                // Do not remove this connection
+                                // we need to notify them about the famTarget failure
+                                removeConnectionFromList = false;
+                                }
                             }
                         }
                                                         
@@ -14540,11 +14713,25 @@ int main() {
 
                             char *pwHash = tokens->getElementDirect( 2 );
                             char *keyHash = tokens->getElementDirect( 3 );
-                            
+
+                            // LVOLOGIN(直播旁观登录):第 4 token 是要观看的主播 id,
+                            // 而非 tutorialNumber。因 "LOGIN" 是 "LVOLOGIN" 的后缀,
+                            // strstr 命中同一分支,此处用前缀区分。
+                            char isLiveViewLogin =
+                                ( strncmp( message, "LVOLOGIN", 8 ) == 0 );
+
                             if( tokens->size() >= 5 ) {
-                                sscanf( tokens->getElementDirect( 4 ),
-                                        "%d", 
-                                        &( nextConnection->tutorialNumber ) );
+                                if( isLiveViewLogin ) {
+                                    sscanf( tokens->getElementDirect( 4 ),
+                                            "%d",
+                                            &( nextConnection->liveViewTargetID ) );
+                                    nextConnection->tutorialNumber = 0;
+                                    }
+                                else {
+                                    sscanf( tokens->getElementDirect( 4 ),
+                                            "%d",
+                                            &( nextConnection->tutorialNumber ) );
+                                    }
                                 }
                             
                             if( tokens->size() == 7 ) {
@@ -14704,24 +14891,42 @@ int main() {
                                             delete [] nextConnection->twinCode;
                                             nextConnection->twinCode = NULL;
                                             }
-                                        int newID = processLoggedInPlayer( 
-                                            true,
-                                            nextConnection->sock,
-                                            nextConnection->sockBuffer,
-                                            nextConnection->email,
-                                            nextConnection,
-                                            nextConnection->tutorialNumber,
-                                            nextConnection->curseStatus,
-                                            nextConnection->lifeStats,
-                                            nextConnection->fitnessScore );
-                                            
-                                        if( newID == -2 ) {
-                                            nextConnection->error = true;
-                                            nextConnection->errorCauseString =
-                                                "Target family is not found or does not have fertiles";
-                                            // Do not remove this connection
-                                            // we need to notify them about the famTarget failure
-                                            removeConnectionFromList = false;
+                                        int newID;
+                                        if( nextConnection->liveViewTargetID >= 0 ) {
+                                            // LVOLOGIN 直播旁观:鉴权同普通登录,但不出生玩家本体,
+                                            // 改造为从出生即 vogMode 的只读 LiveObject。
+                                            newID = processLiveViewSpectator(
+                                                nextConnection->sock,
+                                                nextConnection->sockBuffer,
+                                                nextConnection->email,
+                                                nextConnection,
+                                                nextConnection->liveViewTargetID );
+                                            if( newID == -1 ) {
+                                                nextConnection->error = true;
+                                                nextConnection->errorCauseString =
+                                                    "Invalid live stream target";
+                                                }
+                                            }
+                                        else {
+                                            newID = processLoggedInPlayer(
+                                                true,
+                                                nextConnection->sock,
+                                                nextConnection->sockBuffer,
+                                                nextConnection->email,
+                                                nextConnection,
+                                                nextConnection->tutorialNumber,
+                                                nextConnection->curseStatus,
+                                                nextConnection->lifeStats,
+                                                nextConnection->fitnessScore );
+
+                                            if( newID == -2 ) {
+                                                nextConnection->error = true;
+                                                nextConnection->errorCauseString =
+                                                    "Target family is not found or does not have fertiles";
+                                                // Do not remove this connection
+                                                // we need to notify them about the famTarget failure
+                                                removeConnectionFromList = false;
+                                                }
                                             }
                                         }
                                                                         
@@ -15838,7 +16043,16 @@ int main() {
                     }
                 // LVOX:退出直播观察,恢复进入前位置与 birthPos。
                 else if( m.type == LVOX ) {
-                    if( nextPlayer->liveViewMode ) {
+                    // 经 LVOLOGIN 进入的纯旁观者永不可变回普通玩家:
+                    // 忽略 LVOX(不清标志、不回滚 preVogPos),否则会变成无族谱、
+                    // 可移动可被见的裸玩家。旁观退出靠客户端关 socket。
+                    if( nextPlayer->spectator ) {
+                        AppLog::infoF(
+                            "LVO: spectator %d sent LVOX, ignored "
+                            "(pure spectator cannot exit to world body)",
+                            nextPlayer->id );
+                        }
+                    else if( nextPlayer->liveViewMode ) {
                         nextPlayer->vogMode = false;
                         nextPlayer->liveViewMode = false;
                         nextPlayer->liveViewTargetID = -1;
@@ -23910,8 +24124,13 @@ int main() {
                     // add chunk updates for held babies first
                     for( int j=0; j<numLive; j++ ) {
                         LiveObject *otherPlayer = players.getElement( j );
-                        
+
                         if( otherPlayer->error ) {
+                            continue;
+                            }
+
+                        // 旁观者(vogMode)不作为 held-baby 源泄漏给他人。
+                        if( otherPlayer->vogMode ) {
                             continue;
                             }
 
@@ -25223,11 +25442,14 @@ int main() {
                 AppLog::infoF( "%d remaining player(s) alive on server ",
                                players.size() - 1 );
                 
-                addPastPlayer( nextPlayer );
+                // 旁观者无族谱/统计价值,不入 past-life 记录,避免 0 寿命旁观污染族谱。
+                if( ! nextPlayer->spectator ) {
+                    addPastPlayer( nextPlayer );
+                    }
 
                 if( nextPlayer->sock != NULL ) {
                     sockPoll.removeSocket( nextPlayer->sock );
-                
+
                     delete nextPlayer->sock;
                     nextPlayer->sock = NULL;
                     }
