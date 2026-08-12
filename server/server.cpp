@@ -15756,6 +15756,25 @@ int main() {
                             computeFoodCapacity( nextPlayer );
                         AppLog::infoF( "LVO: LVOS OK p=%d, entered liveView",
                                        nextPlayer->id );
+
+                        // 观众进入观察模式后对所有人不可见(复用 vogMode 不可见语义)。
+                        // 观众出生时(非 vogMode)可能已被附近玩家收到进视野,之后进
+                        // vogMode 虽被 PU 过滤,但他人客户端仍保留该对象直至收到 PO;
+                        // 且观众身体会被 LVOF 搬到主播处。故此处主动向所有其他在线玩家
+                        // 发 PO(Player Out),让其客户端把观众标记为超距隐藏。
+                        // (对从未见过该观众的客户端是 no-op,安全。)
+                        char *poMessage = autoSprintf( "PO\n%d\n#",
+                                                       nextPlayer->id );
+                        int numP = players.size();
+                        for( int pi = 0; pi < numP; pi++ ) {
+                            LiveObject *other = players.getElement( pi );
+                            if( other != nextPlayer &&
+                                other->connected && ! other->error ) {
+                                sendMessageToPlayer( other, poMessage,
+                                                     strlen( poMessage ) );
+                                }
+                            }
+                        delete [] poMessage;
                         }
                     }
                 // LVOF p_id:跳转/跟随指定主播(p_id 在解析时存入 m.id,
