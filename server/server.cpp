@@ -16938,11 +16938,10 @@ int main() {
                             Time::getCurrentTime();
 
                         unsigned int sayLimit = getSayLimit( nextPlayer );
-                        
-                        if( strlen( m.saidText ) > sayLimit ) {
-                            // truncate
-                            m.saidText[ sayLimit ] = '\0';
-                            }
+
+                        // sayLimit 是 UTF-8 字符数(非字节数)。按字符边界
+                        // 截断,避免切断中文等多字节字符产生残缺 UTF-8。
+                        truncateToUTF8CharCount( m.saidText, sayLimit );
 
                         int len = strlen( m.saidText );
                         
