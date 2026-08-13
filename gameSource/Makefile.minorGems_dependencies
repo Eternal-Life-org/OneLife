@@ -368,22 +368,6 @@ ${FONT_O}: ../../minorGems/game/Font.cpp ../../minorGems/game/Font.h \
  ../../minorGems/graphics/openGL/SingleTextureGL.h \
  ../../minorGems/graphics/openGL/glInclude.h \
  ../../minorGems/graphics/RGBAImage.h ../../minorGems/graphics/Image.h \
- /usr/i686-w64-mingw32/include/freetype2/ft2build.h \
- /usr/i686-w64-mingw32/include/freetype2/freetype/config/ftheader.h \
- /usr/i686-w64-mingw32/include/freetype2/freetype/ftglyph.h \
- /usr/i686-w64-mingw32/include/freetype2/freetype/freetype.h \
- /usr/i686-w64-mingw32/include/freetype2/freetype/config/ftconfig.h \
- /usr/i686-w64-mingw32/include/freetype2/freetype/config/ftoption.h \
- /usr/i686-w64-mingw32/include/freetype2/freetype/config/ftstdlib.h \
- /usr/i686-w64-mingw32/include/freetype2/freetype/config/integer-types.h \
- /usr/i686-w64-mingw32/include/freetype2/freetype/config/public-macros.h \
- /usr/i686-w64-mingw32/include/freetype2/freetype/config/mac-support.h \
- /usr/i686-w64-mingw32/include/freetype2/freetype/fttypes.h \
- /usr/i686-w64-mingw32/include/freetype2/freetype/ftsystem.h \
- /usr/i686-w64-mingw32/include/freetype2/freetype/ftimage.h \
- /usr/i686-w64-mingw32/include/freetype2/freetype/fterrors.h \
- /usr/i686-w64-mingw32/include/freetype2/freetype/ftmoderr.h \
- /usr/i686-w64-mingw32/include/freetype2/freetype/fterrdef.h \
  ../../minorGems/util/SettingsManager.h \
  ../../minorGems/system/MutexLock.h ../../minorGems/system/Time.h
 ${DRAW_UTILS_O}: ../../minorGems/game/drawUtils.cpp \
