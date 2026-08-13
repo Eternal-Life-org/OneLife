@@ -17216,29 +17216,56 @@ int main() {
                         // now clean up gratuitous runs of spaces left behind
                         // by removed characters (or submitted by a wayward
                         // client)
-                        SimpleVector<char *> *tokens = 
-                            tokenizeString( m.saidText );
+                        // 保留手动换行:按 '\n' 分段,段内清理多余空格,
+                        // 段间以 '\n' 重连(多行气泡;PS 广播按行拆发,
+                        // 客户端把解析不出 id 的行拼回上一说话者)
+                        int numSaySegs;
+                        char **saySegs =
+                            split( m.saidText, "\n", &numSaySegs );
+
+                        SimpleVector<char *> *sayLines =
+                            new SimpleVector<char *>();
+
+                        for( int s = 0; s < numSaySegs; s++ ) {
+                            SimpleVector<char *> *tokens =
+                                tokenizeString( saySegs[s] );
+
+                            if( tokens->size() > 0 ) {
+                                char **tokensArray =
+                                    tokens->getElementArray();
+
+                                sayLines->push_back(
+                                    join( tokensArray,
+                                          tokens->size(),
+                                          " " ) );
+
+                                tokens->deallocateStringElements();
+                                delete [] tokensArray;
+                                }
+
+                            delete tokens;
+                            delete [] saySegs[s];
+                            }
+                        delete [] saySegs;
 
                         char *cleanedString;
-                        if( tokens->size() > 0 ) {
-                        
-                            char **tokensArray = 
-                                tokens->getElementArray();
-                        
-                            // join words with single spaces
-                            cleanedString = join( tokensArray,
-                                                  tokens->size(),
-                                                  " " );
-                        
-                            tokens->deallocateStringElements();
-                            delete [] tokensArray;
+                        if( sayLines->size() > 0 ) {
+                            char **linesArray =
+                                sayLines->getElementArray();
+
+                            cleanedString = join( linesArray,
+                                                  sayLines->size(),
+                                                  "\n" );
+
+                            delete [] linesArray;
                             }
                         else {
                             cleanedString = stringDuplicate( "" );
                             }
 
-                        delete tokens;
-                        
+                        sayLines->deallocateStringElements();
+                        delete sayLines;
+
                         delete [] m.saidText;
                         m.saidText = cleanedString;
                         
