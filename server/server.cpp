@@ -6232,6 +6232,88 @@ static SimpleVector<int> newEmotIndices;
 static SimpleVector<int> newEmotTTLs;
 
 
+// 格式：+yumXXX 表示此食物与 ID=XXX 的食物属于同一 yum 组
+// 支持 category 母物品继承：若子物品无 +yum 标签，检查其 category 母物品
+// 返回目标 ID，若未找到则返回 -1
+static int getYumTargetID( int inObjectID ) {
+    ObjectRecord *o = getObject( inObjectID );
+    if( o == NULL ) return -1;
+
+    // 首先检查物品自己的描述
+    char *yumLoc = strstr( o->description, "+yum" );
+    if( yumLoc != NULL ) {
+        int targetID;
+        if( sscanf( yumLoc, "+yum%d", &targetID ) == 1 ) {
+            printf( "[+yum] getYumTargetID: object %d has +yum%d (from own description '%s')\n",
+                    inObjectID, targetID, o->description );
+            return targetID;
+            }
+        }
+
+    // 若物品自己没有标签，检查 category 母物品（category 继承）
+    ReverseCategoryRecord *revCat = getReverseCategory( inObjectID );
+    if( revCat != NULL ) {
+        for( int i=0; i<revCat->categoryIDSet.size(); i++ ) {
+            int catID = revCat->categoryIDSet.getElementDirect( i );
+            CategoryRecord *cat = getCategory( catID );
+            if( cat != NULL ) {
+                ObjectRecord *catObj = getObject( cat->parentID );
+                if( catObj != NULL ) {
+                    yumLoc = strstr( catObj->description, "+yum" );
+                    if( yumLoc != NULL ) {
+                        int targetID;
+                        if( sscanf( yumLoc, "+yum%d", &targetID ) == 1 ) {
+                            printf( "[+yum] getYumTargetID: object %d inherits +yum%d from category parent %d ('%s')\n",
+                                    inObjectID, targetID, cat->parentID, catObj->description );
+                            return targetID;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+    return -1;
+    }
+
+
+// 传递性地解析 yum 组根节点
+// 跟随 +yum 标签链直到无标签的食物（根节点）或检测到循环
+// 循环时使用 visited 中最小 ID 作为确定性根节点
+// 同一 yum 组的所有食物会解析到相同的根节点
+static int resolveYumGroup( int inObjectID ) {
+    SimpleVector<int> visited;
+    int current = inObjectID;
+
+    while( true ) {
+        // 检测循环：当前 ID 已在访问路径中
+        if( visited.getElementIndex( current ) != -1 ) {
+            // 找到 visited 中所有循环成员的 ID，取最小值作为根
+            // 这样可以确保从循环中任一节点出发都得到相同的根
+            int minID = current;
+            for( int i=0; i<visited.size(); i++ ) {
+                int id = visited.getElementDirect( i );
+                if( id < minID ) minID = id;
+                }
+            printf( "[+yum] resolveYumGroup: object %d -> cycle detected, root=%d\n",
+                    inObjectID, minID );
+            return minID;
+            }
+        visited.push_back( current );
+
+        int target = getYumTargetID( current );
+        if( target == -1 ) {
+            // 无 +yum 标签，此为根节点
+            if( current != inObjectID ) {
+                printf( "[+yum] resolveYumGroup: object %d -> chain ends at %d\n",
+                        inObjectID, current );
+                }
+            return current;
+            }
+        current = target;
+        }
+    }
+
 
 static char isYummy( LiveObject *inPlayer, int inObjectID ) {
     ObjectRecord *o = getObject( inObjectID );
@@ -6245,6 +6327,9 @@ static char isYummy( LiveObject *inPlayer, int inObjectID ) {
         return false;
         }
 
+    printf( "[+yum] isYummy: checking food %d, description='%s', chainSize=%d\n",
+            inObjectID, o->description, inPlayer->yummyFoodChain.size() );
+
     if( inObjectID == inPlayer->cravingFood.foodID &&
         computeAge( inPlayer ) >= minAgeForCravings ) {
         return true;
@@ -6255,6 +6340,26 @@ static char isYummy( LiveObject *inPlayer, int inObjectID ) {
             return false;
             }
         }
+
+    // +yum 组等价检查（传递性）
+    // 解析新食物的 yum 组根，与链中每个食物的 yum 组根比较
+    // 同一组内的食物共享同一个根节点
+    int newFoodGroupRoot = resolveYumGroup( inObjectID );
+
+    for( int i=0; i<inPlayer->yummyFoodChain.size(); i++ ) {
+        int chainFoodID = inPlayer->yummyFoodChain.getElementDirect( i );
+        int chainGroupRoot = resolveYumGroup( chainFoodID );
+
+        printf( "[+yum] isYummy: comparing new food %d (groupRoot=%d) vs chain food %d (groupRoot=%d)\n",
+                inObjectID, newFoodGroupRoot, chainFoodID, chainGroupRoot );
+
+        if( newFoodGroupRoot == chainGroupRoot ) {
+            printf( "[+yum] isYummy: SAME GROUP -> NOT yum (meh)!\n" );
+            return false;
+            }
+        }
+
+    printf( "[+yum] isYummy: food %d is YUM (no group match in chain)\n", inObjectID );
     return true;
     }
     
@@ -6280,6 +6385,21 @@ static char isReallyYummy( LiveObject *inPlayer, int inObjectID ) {
             return false;
             }
         }
+
+    // +yum 组等价检查（传递性）
+    // 解析新食物的 yum 组根，与链中每个食物的 yum 组根比较
+    // 同一组内的食物共享同一个根节点
+    int newFoodGroupRoot = resolveYumGroup( inObjectID );
+
+    for( int i=0; i<inPlayer->yummyFoodChain.size(); i++ ) {
+        int chainFoodID = inPlayer->yummyFoodChain.getElementDirect( i );
+        int chainGroupRoot = resolveYumGroup( chainFoodID );
+
+        if( newFoodGroupRoot == chainGroupRoot ) {
+            return false;
+            }
+        }
+
     return true;
     }
 
