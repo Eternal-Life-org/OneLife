@@ -185,8 +185,14 @@ void TextField::setText( const char *inText ) {
     } else {
         insertString(inText);
     }
+    // insertString 可能因 maxLength 限制或非法 UTF-8 序列提前 break，
+    // 此时 mText 仍为 NULL，下方 strlen(NULL) 会崩溃。补 NULL 守卫。
+    if( mText == NULL ) {
+        mText = new char[1];
+        mText[0] = 0;
+    }
     mTextLen = strlen( mText );
-    
+
     mCursorPosition = mTextLen;
     // hold-downs broken
     mHoldDeleteSteps = -1;
@@ -785,7 +791,7 @@ void TextField::insertString(const char *inString ) {
         } else {
             charWidth = -1;
         }
-        if (charWidth < 0 || (mMaxLength > 0 && (mTextLen + charWidth >= mMaxLength)))
+        if (charWidth < 0 || (mMaxLength > 0 && (mTextLen + charWidth > mMaxLength)))
             break;
         bool insertSuccess = true;
         for (int i=0; i<charWidth; i++){
