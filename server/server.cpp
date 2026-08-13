@@ -24949,10 +24949,46 @@ int main() {
                                 int curseFlag =
                                     newSpeechCurseFlags.getElementDirect( u );
 
-                                char *line = autoSprintf( "%d/%d %s\n", 
+                                // 多行语音:续行加 ':' 前缀标记。否则数字
+                                // 开头的续行会被客户端 sscanf("%d") 误解析
+                                // 为新说话者头('%d 文本' 格式)而丢弃。
+                                // ':' 非空白非数字非符号,%d 必然解析失败。
+                                int numPhraseLines;
+                                char **phraseLines = split( translatedPhrase,
+                                                            "\n",
+                                                            &numPhraseLines );
+                                char *markedPhrase;
+                                if( numPhraseLines > 1 ) {
+                                    SimpleVector<char> markedWorking;
+                                    markedWorking.appendElementString(
+                                        phraseLines[0] );
+                                    for( int pl = 1;
+                                         pl < numPhraseLines;
+                                         pl++ ) {
+                                        markedWorking.appendElementString(
+                                            "\n:" );
+                                        markedWorking.appendElementString(
+                                            phraseLines[pl] );
+                                        }
+                                    markedPhrase =
+                                        markedWorking.getElementString();
+                                    }
+                                else {
+                                    markedPhrase =
+                                        stringDuplicate( translatedPhrase );
+                                    }
+                                for( int pl = 0;
+                                     pl < numPhraseLines;
+                                     pl++ ) {
+                                    delete [] phraseLines[pl];
+                                    }
+                                delete [] phraseLines;
+
+                                char *line = autoSprintf( "%d/%d %s\n",
                                                           speakerID,
                                                           curseFlag,
-                                                          translatedPhrase );
+                                                          markedPhrase );
+                                delete [] markedPhrase;
                                 delete [] translatedPhrase;
                                 delete [] trimmedPhrase;
                                 
