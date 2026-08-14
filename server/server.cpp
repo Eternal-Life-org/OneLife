@@ -2575,12 +2575,19 @@ ClientMessage parseMessage( LiveObject *inPlayer, char *inMessage ) {
         }
     else if( strcmp( nameBuffer, "DROP" ) == 0 ) {
         m.type = DROP;
-        numRead = sscanf( inMessage, 
-                          "%99s %d %d %d", 
-                          nameBuffer, &( m.x ), &( m.y ), &( m.c ) );
-        
-        if( numRead != 4 ) {
+        // 第 5 段可选槽位 i:DROP x y c i = 与穿着容器栈下标 i 精确交换
+        // (m.i 默认 -1 = 旧语义:加顶后从堆底扫描弹一件;旧客户端 4 字段
+        //  消息多余 token 被 sscanf 忽略,天然兼容)
+        numRead = sscanf( inMessage,
+                          "%99s %d %d %d %d",
+                          nameBuffer, &( m.x ), &( m.y ), &( m.c ),
+                          &( m.i ) );
+
+        if( numRead < 4 ) {
             m.type = UNKNOWN;
+            }
+        if( numRead == 4 ) {
+            m.i = -1;
             }
         }
     else if( strcmp( nameBuffer, "KILL" ) == 0 ) {
@@ -10258,6 +10265,75 @@ static char addHeldToClothingContainer( LiveObject *inPlayer,
 
     return false;
     }
+
+
+
+// 与穿着容器栈下标 inI 精确交换:contained[i] <-> 手持,原位互换不动其他格
+// (动作轮盘 DROP x y c i 语义;纯互换,不执行容器转移 contTrans)
+static char swapHeldIntoClothingContainerSlot( LiveObject *inPlayer,
+                                               int inC,
+                                               int inI ) {
+    ObjectRecord *cObj =
+        clothingByIndex( inPlayer->clothing, inC );
+
+    if( cObj == NULL ||
+        ! containmentPermitted( cObj->id, inPlayer->holdingID ) ) {
+        return false;
+        }
+
+    int oldNum = inPlayer->clothingContained[inC].size();
+
+    if( inI < 0 || inI >= oldNum ) {
+        return false;
+        }
+
+    int outID = inPlayer->clothingContained[inC].getElementDirect( inI );
+
+    // 换出的物品须可取(与 removeFromClothingContainerToHold 同门槛)
+    double playerAge = computeAge( inPlayer );
+    TransRecord *pickUpTrans = getPTrans( 0, outID );
+    bool hasPickUpTrans =
+        pickUpTrans != NULL && pickUpTrans->newTarget == 0;
+
+    if( getObject( outID )->minPickupAge > playerAge ||
+        ( getObject( outID )->permanent && ! hasPickUpTrans ) ) {
+        return false;
+        }
+
+    // 衰减 eta 互换:入槽按 stretch 压缩,入手按 stretch 放大
+    // (镜像 add/remove 两条路径的换算)
+    float stretch = cObj->slotTimeStretch;
+
+    timeSec_t curTime = Time::getCurrentTime();
+
+    timeSec_t inEta = inPlayer->holdingEtaDecay;
+    timeSec_t outEta =
+        inPlayer->clothingContainedEtaDecays[inC].getElementDirect( inI );
+
+    if( inEta != 0 ) {
+        timeSec_t offset = ( inEta - curTime ) / stretch;
+        inEta = curTime + offset;
+        }
+    if( outEta != 0 ) {
+        timeSec_t offset = ( outEta - curTime ) * stretch;
+        outEta = curTime + offset;
+        }
+
+    int inID = inPlayer->holdingID;
+
+    // 原位替换(deleteElement + push_middle 保持其他格下标不变)
+    inPlayer->clothingContained[inC].deleteElement( inI );
+    inPlayer->clothingContained[inC].push_middle( inID, inI );
+    inPlayer->clothingContainedEtaDecays[inC].deleteElement( inI );
+    inPlayer->clothingContainedEtaDecays[inC].push_middle( inEta, inI );
+
+    inPlayer->holdingID = outID;
+    inPlayer->holdingEtaDecay = outEta;
+    holdingSomethingNew( inPlayer );
+
+    return true;
+    }
+
 
 
 
@@ -20666,7 +20742,19 @@ int main() {
                                     
                                     // drop into clothing indicates right-click
                                     // so swap
-                                    
+
+                                    // 带槽位号(DROP x y c i)时先尝试与该栈
+                                    // 下标精确交换;失败(越界/不可取/尺寸
+                                    // 不符)回退旧的加顶+弹底逻辑
+                                    char slotSwapDone = false;
+                                    if( m.i >= 0 ) {
+                                        slotSwapDone =
+                                            swapHeldIntoClothingContainerSlot(
+                                                nextPlayer, m.c, m.i );
+                                        }
+
+                                    if( ! slotSwapDone ) {
+
                                     // first add to top of container
                                     // if possible
                                     addHeldToClothingContainer( nextPlayer,
@@ -20726,18 +20814,19 @@ int main() {
                                                 nextPlayer->clothing, m.c );
                                         if( nextPlayer->clothingContained[m.c].
                                             size() > cObj->numSlots ) {
-                                            
+
                                             // over-full, remove failed
-                                            
+
                                             // pop top item back off into hand
                                             removeFromClothingContainerToHold(
-                                                nextPlayer, m.c, 
+                                                nextPlayer, m.c,
                                                 nextPlayer->
                                                 clothingContained[m.c].
                                                 size() - 1, true );
                                             }
                                         }
-                                    
+                                        }
+
                                     }
                                 else if( nextPlayer->holdingID > 0 ) {
                                     // non-baby drop
