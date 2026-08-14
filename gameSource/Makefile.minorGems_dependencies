@@ -24,13 +24,12 @@ ${SCREEN_GL_O}: ../../minorGems/graphics/openGL/ScreenGL_SDL.cpp \
  ../../minorGems/system/MutexLock.h ../../minorGems/util/log/AppLog.h \
  ../../minorGems/util/log/Log.h ../../minorGems/util/log/PrintLog.h \
  ../../minorGems/io/file/File.h ../../minorGems/io/file/Path.h \
- ../../minorGems/io/file/Directory.h \
  ../../minorGems/io/file/FileInputStream.h ../../minorGems/io/file/File.h \
  ../../minorGems/io/InputStream.h \
  ../../minorGems/io/file/FileOutputStream.h \
- ../../minorGems/io/OutputStream.h ../../minorGems/system/Thread.h \
- ../../minorGems/crypto/hashes/sha1.h ../../minorGems/system/endian.h \
- ../../minorGems/formats/encodingUtils.h
+ ../../minorGems/io/OutputStream.h ../../minorGems/io/file/Directory.h \
+ ../../minorGems/system/Thread.h ../../minorGems/crypto/hashes/sha1.h \
+ ../../minorGems/system/endian.h ../../minorGems/formats/encodingUtils.h
 ${SINGLE_TEXTURE_GL_O}: ../../minorGems/graphics/openGL/SingleTextureGL.cpp \
  ../../minorGems/graphics/openGL/SingleTextureGL.h \
  ../../minorGems/graphics/openGL/glInclude.h \
@@ -75,21 +74,16 @@ ${MUTEX_LOCK_O}: ../../minorGems/system/win32/MutexLockWin32.cpp \
  ../../minorGems/common.h \
  ../../minorGems/util/development/memory/debugMemory.h \
  ../../minorGems/system/MutexLock.h
-${BINARY_SEMAPHORE_O}: \
- ../../minorGems/system/win32/BinarySemaphoreWin32.cpp \
- ../../minorGems/system/BinarySemaphore.h ../../minorGems/common.h \
- ../../minorGems/util/development/memory/debugMemory.h \
- ../../minorGems/system/MutexLock.h
 ${TRANSLATION_MANAGER_O}: ../../minorGems/util/TranslationManager.cpp \
  ../../minorGems/util/TranslationManager.h ../../minorGems/common.h \
  ../../minorGems/util/development/memory/debugMemory.h \
  ../../minorGems/util/SimpleVector.h ../../minorGems/io/file/File.h \
  ../../minorGems/io/file/Path.h ../../minorGems/util/stringUtils.h \
- ../../minorGems/system/Time.h ../../minorGems/io/file/Directory.h \
- ../../minorGems/io/file/FileInputStream.h ../../minorGems/io/file/File.h \
- ../../minorGems/io/InputStream.h ../../minorGems/io/Stream.h \
- ../../minorGems/io/TypeIO.h ../../minorGems/io/file/FileOutputStream.h \
- ../../minorGems/io/OutputStream.h
+ ../../minorGems/system/Time.h ../../minorGems/io/file/FileInputStream.h \
+ ../../minorGems/io/file/File.h ../../minorGems/io/InputStream.h \
+ ../../minorGems/io/Stream.h ../../minorGems/io/TypeIO.h \
+ ../../minorGems/io/file/FileOutputStream.h \
+ ../../minorGems/io/OutputStream.h ../../minorGems/io/file/Directory.h
 ${SOCKET_O}: ../../minorGems/network/win32/SocketWin32.cpp \
  ../../minorGems/network/Socket.h ../../minorGems/common.h \
  ../../minorGems/util/development/memory/debugMemory.h \
@@ -167,12 +161,12 @@ ${SETTINGS_MANAGER_O}: ../../minorGems/util/SettingsManager.cpp \
  ../../minorGems/util/SimpleVector.h ../../minorGems/system/MutexLock.h \
  ../../minorGems/system/Time.h ../../minorGems/util/stringUtils.h \
  ../../minorGems/io/file/File.h ../../minorGems/io/file/Path.h \
- ../../minorGems/io/file/Directory.h \
  ../../minorGems/io/file/FileInputStream.h ../../minorGems/io/file/File.h \
  ../../minorGems/io/InputStream.h ../../minorGems/io/Stream.h \
  ../../minorGems/io/TypeIO.h ../../minorGems/io/file/FileOutputStream.h \
- ../../minorGems/io/OutputStream.h ../../minorGems/io/file/Path.h \
- ../../minorGems/crypto/hashes/sha1.h ../../minorGems/system/endian.h
+ ../../minorGems/io/OutputStream.h ../../minorGems/io/file/Directory.h \
+ ../../minorGems/io/file/Path.h ../../minorGems/crypto/hashes/sha1.h \
+ ../../minorGems/system/endian.h
 ${FINISHED_SIGNAL_THREAD_O}: ../../minorGems/system/FinishedSignalThread.cpp \
  ../../minorGems/system/FinishedSignalThread.h \
  ../../minorGems/system/Thread.h ../../minorGems/common.h \
@@ -201,11 +195,11 @@ ${DIRECTORY_O}: ../../minorGems/io/file/win32/DirectoryWin32.cpp \
  ../../minorGems/util/development/memory/debugMemory.h \
  ../../minorGems/io/file/File.h ../../minorGems/io/file/Path.h \
  ../../minorGems/util/stringUtils.h ../../minorGems/util/SimpleVector.h \
- ../../minorGems/system/Time.h ../../minorGems/io/file/Directory.h \
- ../../minorGems/io/file/FileInputStream.h ../../minorGems/io/file/File.h \
- ../../minorGems/io/InputStream.h ../../minorGems/io/Stream.h \
- ../../minorGems/io/TypeIO.h ../../minorGems/io/file/FileOutputStream.h \
- ../../minorGems/io/OutputStream.h
+ ../../minorGems/system/Time.h ../../minorGems/io/file/FileInputStream.h \
+ ../../minorGems/io/file/File.h ../../minorGems/io/InputStream.h \
+ ../../minorGems/io/Stream.h ../../minorGems/io/TypeIO.h \
+ ../../minorGems/io/file/FileOutputStream.h \
+ ../../minorGems/io/OutputStream.h ../../minorGems/io/file/Directory.h
 ${LOG_O}: ../../minorGems/util/log/Log.cpp ../../minorGems/util/log/Log.h \
  ../../minorGems/common.h \
  ../../minorGems/util/development/memory/debugMemory.h
@@ -221,11 +215,10 @@ ${FILE_LOG_O}: ../../minorGems/util/log/FileLog.cpp \
  ../../minorGems/util/log/Log.h ../../minorGems/system/MutexLock.h \
  ../../minorGems/util/stringUtils.h ../../minorGems/util/SimpleVector.h \
  ../../minorGems/io/file/File.h ../../minorGems/io/file/Path.h \
- ../../minorGems/io/file/Directory.h \
  ../../minorGems/io/file/FileInputStream.h ../../minorGems/io/file/File.h \
  ../../minorGems/io/InputStream.h ../../minorGems/io/Stream.h \
  ../../minorGems/io/TypeIO.h ../../minorGems/io/file/FileOutputStream.h \
- ../../minorGems/io/OutputStream.h
+ ../../minorGems/io/OutputStream.h ../../minorGems/io/file/Directory.h
 ${PRINT_LOG_O}: ../../minorGems/util/log/PrintLog.cpp \
  ../../minorGems/util/log/PrintLog.h ../../minorGems/common.h \
  ../../minorGems/util/development/memory/debugMemory.h \
@@ -265,12 +258,12 @@ ${GAME_SDL_O}: ../../minorGems/game/platforms/SDL/gameSDL.cpp \
  ../../minorGems/graphics/openGL/glInclude.h \
  ../../minorGems/graphics/openGL/MouseHandlerGL.h \
  ../../minorGems/ui/event/ActionListener.h ../../minorGems/io/file/File.h \
- ../../minorGems/io/file/Path.h ../../minorGems/io/file/Directory.h \
- ../../minorGems/io/file/FileInputStream.h ../../minorGems/io/file/File.h \
- ../../minorGems/io/InputStream.h \
+ ../../minorGems/io/file/Path.h ../../minorGems/io/file/FileInputStream.h \
+ ../../minorGems/io/file/File.h ../../minorGems/io/InputStream.h \
  ../../minorGems/io/file/FileOutputStream.h \
- ../../minorGems/io/OutputStream.h ../../minorGems/network/SocketClient.h \
- ../../minorGems/network/Socket.h ../../minorGems/network/HostAddress.h \
+ ../../minorGems/io/OutputStream.h ../../minorGems/io/file/Directory.h \
+ ../../minorGems/network/SocketClient.h ../../minorGems/network/Socket.h \
+ ../../minorGems/network/HostAddress.h \
  ../../minorGems/network/upnp/portMapping.h \
  ../../minorGems/util/SettingsManager.h \
  ../../minorGems/util/TranslationManager.h \
@@ -368,6 +361,22 @@ ${FONT_O}: ../../minorGems/game/Font.cpp ../../minorGems/game/Font.h \
  ../../minorGems/graphics/openGL/SingleTextureGL.h \
  ../../minorGems/graphics/openGL/glInclude.h \
  ../../minorGems/graphics/RGBAImage.h ../../minorGems/graphics/Image.h \
+ /mnt/d/root/dependencies/freetype_mingw/include/freetype2/ft2build.h \
+ /mnt/d/root/dependencies/freetype_mingw/include/freetype2/freetype/config/ftheader.h \
+ /mnt/d/root/dependencies/freetype_mingw/include/freetype2/freetype/ftglyph.h \
+ /mnt/d/root/dependencies/freetype_mingw/include/freetype2/freetype/freetype.h \
+ /mnt/d/root/dependencies/freetype_mingw/include/freetype2/freetype/config/ftconfig.h \
+ /mnt/d/root/dependencies/freetype_mingw/include/freetype2/freetype/config/ftoption.h \
+ /mnt/d/root/dependencies/freetype_mingw/include/freetype2/freetype/config/ftstdlib.h \
+ /mnt/d/root/dependencies/freetype_mingw/include/freetype2/freetype/config/integer-types.h \
+ /mnt/d/root/dependencies/freetype_mingw/include/freetype2/freetype/config/public-macros.h \
+ /mnt/d/root/dependencies/freetype_mingw/include/freetype2/freetype/config/mac-support.h \
+ /mnt/d/root/dependencies/freetype_mingw/include/freetype2/freetype/fttypes.h \
+ /mnt/d/root/dependencies/freetype_mingw/include/freetype2/freetype/ftsystem.h \
+ /mnt/d/root/dependencies/freetype_mingw/include/freetype2/freetype/ftimage.h \
+ /mnt/d/root/dependencies/freetype_mingw/include/freetype2/freetype/fterrors.h \
+ /mnt/d/root/dependencies/freetype_mingw/include/freetype2/freetype/ftmoderr.h \
+ /mnt/d/root/dependencies/freetype_mingw/include/freetype2/freetype/fterrdef.h \
  ../../minorGems/util/SettingsManager.h \
  ../../minorGems/system/MutexLock.h ../../minorGems/system/Time.h
 ${DRAW_UTILS_O}: ../../minorGems/game/drawUtils.cpp \
@@ -440,11 +449,11 @@ ${DIFF_BUNDLE_CLIENT_O}: \
  ../../minorGems/util/SimpleVector.h ../../minorGems/system/Time.h \
  ../../minorGems/graphics/openGL/KeyboardHandlerGL.h \
  ../../minorGems/io/file/File.h ../../minorGems/io/file/Path.h \
- ../../minorGems/util/stringUtils.h ../../minorGems/io/file/Directory.h \
+ ../../minorGems/util/stringUtils.h \
  ../../minorGems/io/file/FileInputStream.h ../../minorGems/io/file/File.h \
  ../../minorGems/io/InputStream.h \
  ../../minorGems/io/file/FileOutputStream.h \
- ../../minorGems/io/OutputStream.h \
+ ../../minorGems/io/OutputStream.h ../../minorGems/io/file/Directory.h \
  ../../minorGems/formats/encodingUtils.h \
  ../../minorGems/crypto/hashes/sha1.h ../../minorGems/system/endian.h \
  ../../minorGems/util/log/AppLog.h ../../minorGems/util/log/Log.h \
@@ -457,7 +466,11 @@ ${STRING_TREE_O}: ../../minorGems/util/StringTree.cpp \
  ../../minorGems/common.h \
  ../../minorGems/util/development/memory/debugMemory.h \
  ../../minorGems/util/stringUtils.h
-${CRC32_O}: ../../minorGems/util/crc32.cpp
+${BINARY_SEMAPHORE_O}: \
+ ../../minorGems/system/win32/BinarySemaphoreWin32.cpp \
+ ../../minorGems/system/BinarySemaphore.h ../../minorGems/common.h \
+ ../../minorGems/util/development/memory/debugMemory.h \
+ ../../minorGems/system/MutexLock.h
 PNGImageConverter.o: \
  ../../minorGems/graphics/converters/PNGImageConverter.cpp \
  ../../minorGems/graphics/converters/PNGImageConverter.h \
