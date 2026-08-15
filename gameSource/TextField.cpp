@@ -26,6 +26,16 @@ int TextField::sDeleteNextDelaySteps = 2 / frameRateFactor;
 char TextField::sPasteShortcutForNewFields = false;
 
 
+// snaps a byte index to the start of the UTF-8 character containing it
+// (UTF-8 continuation bytes match 10xxxxxx)
+static int utf8CharStart( const char *inText, int inPos ) {
+    while( inPos > 0 && ( (unsigned char)inText[ inPos ] & 0xC0 ) == 0x80 ) {
+        inPos--;
+        }
+    return inPos;
+    }
+
+
 
 
 TextField::TextField( Font *inDisplayFont, 
@@ -179,7 +189,6 @@ void TextField::setContentsHidden( char inHidden ) {
 void TextField::setText( const char *inText ) {
     delete [] mText;
     mText = NULL;
-    mCharDict.deleteAll();
 
     mSelectionStart = -1;
     mSelectionEnd = -1;
@@ -687,6 +696,14 @@ void TextField::placeCursorAtX( float inX ) {
             }
         }
 
+    // snap to a UTF-8 character boundary
+    // (don't stop in the middle of a multi-byte character)
+    while( bestCursorDrawPosition > 0 &&
+           bestCursorDrawPosition < drawnTextLength &&
+           ( (unsigned char)mDrawnText[ bestCursorDrawPosition ] & 0xC0 ) == 0x80 ) {
+        bestCursorDrawPosition --;
+        }
+
     int cursorDelta = bestCursorDrawPosition - mCursorDrawPosition;
 
     mCursorPosition += cursorDelta;
@@ -804,9 +821,17 @@ void TextField::pointerUp( float inX, float inY ) {
                     bestDistance = thisDistance;
                     }
                 }
-            
+
+            // snap to a UTF-8 character boundary
+            // (don't stop in the middle of a multi-byte character)
+            while( bestCursorDrawPosition > 0 &&
+                   bestCursorDrawPosition < drawnTextLength &&
+                   ( (unsigned char)mDrawnText[ bestCursorDrawPosition ] & 0xC0 ) == 0x80 ) {
+                bestCursorDrawPosition --;
+                }
+
             int cursorDelta = bestCursorDrawPosition - mCursorDrawPosition;
-            
+
             mCursorPosition += cursorDelta;
             }
         }
@@ -945,7 +970,7 @@ void TextField::insertString(const char *inString ) {
         }
         bool insertSuccess = true;
         for (int i=0; i<charWidth; i++){
-            unsigned char processedChar = processCharacter( *(p+i));    
+            unsigned char processedChar = processCharacter( *(p+i));
             if( processedChar != 0 ) {
                 insertCharacter( processedChar );
             } else {
@@ -959,9 +984,6 @@ void TextField::insertString(const char *inString ) {
                 insertSuccess = false;
                 break;
             }
-        }
-        if (insertSuccess) {
-            insertCharIndex(mCursorPosition - charWidth);
         }
         p += charWidth;
     }
@@ -1035,30 +1057,12 @@ void TextField::setFireOnLoseFocus( char inFireOnLeave ) {
     mFireOnLeave = inFireOnLeave;
     }
 
-int TextField::getElementBeforeNumber(int val) {
-    int inNumBefore;
-    for (inNumBefore=0; inNumBefore < mCharDict.size(); inNumBefore ++){
-        int v = mCharDict.getElementDirectFast(inNumBefore);
-        if (v >= val) 
-            break;
-    }
-    return inNumBefore;
-}
-void TextField::insertCharIndex(int val) {
-    int inNumBefore = getElementBeforeNumber(val);
-    if (inNumBefore == mCharDict.size()) {
-        mCharDict.push_back(val);
-    } else if (mCharDict.getElementDirect(inNumBefore) > val) {
-            mCharDict.push_middle(val, inNumBefore-1);
-    }
-}
-
 void TextField::keyDown( unsigned char inASCII ) {
     if( !mFocused ) {
         return;
         }
     mCursorFlashSteps = 0;
-    
+
     if( isCommandKeyDown() ) {
         // not a normal key stroke (command key)
         // ignore it as input
@@ -1110,18 +1114,6 @@ void TextField::keyDown( unsigned char inASCII ) {
                     setClipboardText( selectedText );
                     delete [] selectedText;
 
-                    // keep the unicode index map in sync with
-                    // the bytes we are about to remove
-                    for( int i=0; i<mCharDict.size(); ) {
-                        int pos = mCharDict.getElementDirectFast( i );
-                        if( pos >= mSelectionStart && pos < mSelectionEnd ) {
-                            mCharDict.deleteElement( i );
-                            }
-                        else {
-                            i++;
-                            }
-                        }
-
                     deleteHit();
 
                     mHoldDeleteSteps = -1;
@@ -1155,16 +1147,9 @@ void TextField::keyDown( unsigned char inASCII ) {
 
     if( inASCII == 127 || inASCII == 8 ) {
         // delete
-        int curIndex = getElementBeforeNumber(mCursorPosition);
-        if (curIndex > 0) {
-            mSelectionStart = mCharDict.getElementDirectFast(curIndex-1);
-            mSelectionEnd = mCursorPosition;
-        }
-        
+        // (deleteHit removes a whole UTF-8 character at a time)
         deleteHit();
-        mCharDict.deleteElement(curIndex);
-        mSelectionStart = -1;
-        mSelectionEnd = -1;
+
         mHoldDeleteSteps = 0;
 
         clearArrowRepeat();
@@ -1176,7 +1161,6 @@ void TextField::keyDown( unsigned char inASCII ) {
         if( processedChar != 0 ) {
             // newline is allowed
             insertCharacter( processedChar );
-            insertCharIndex(mCursorPosition - 1);
             mHoldDeleteSteps = -1;
             mFirstDeleteRepeatDone = false;
             
@@ -1196,10 +1180,9 @@ void TextField::keyDown( unsigned char inASCII ) {
         unsigned char processedChar = processCharacter( inASCII );    
 
         if( processedChar != 0 ) {
-            
+
             insertCharacter( processedChar );
-            insertCharIndex(mCursorPosition - 1);
-        }
+            }
         
         mHoldDeleteSteps = -1;
         mFirstDeleteRepeatDone = false;
@@ -1259,6 +1242,12 @@ void TextField::deleteHit() {
                      mText[ newCursorPos - 1 ] == '\r' ) ) {
                 newCursorPos --;
                 }
+            }
+        else {
+            // plain backspace:
+            // expand to remove the whole UTF-8 character
+            // containing the byte before the cursor
+            newCursorPos = utf8CharStart( mText, newCursorPos );
             }
         
         // section cleared no matter what when delete is hit
@@ -1339,8 +1328,10 @@ void TextField::leftHit() {
             }
         
         }
-    else {    
+    else {
         mCursorPosition --;
+        // snap to the start of the UTF-8 character we stepped into
+        mCursorPosition = utf8CharStart( mText, mCursorPosition );
         if( mCursorPosition < 0 ) {
             mCursorPosition = 0;
             }
@@ -1400,6 +1391,12 @@ void TextField::rightHit() {
         }
     else {
         mCursorPosition ++;
+        // skip UTF-8 continuation bytes (10xxxxxx)
+        // to land on the next character boundary
+        while( mCursorPosition < (int)strlen( mText ) &&
+               ( (unsigned char)mText[ mCursorPosition ] & 0xC0 ) == 0x80 ) {
+            mCursorPosition ++;
+            }
         if( mCursorPosition > (int)strlen( mText ) ) {
             mCursorPosition = strlen( mText );
             }

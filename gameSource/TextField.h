@@ -232,9 +232,7 @@ class TextField : public PageComponent, public ActionListenerList {
 
         char *mText;
         int mTextLen;
-        
 
-        SimpleVector<int> mCharDict = SimpleVector<int> (128); //用于记录每个unicode字符在utf8数组中的位置
 
         int mCursorPosition;
         
@@ -297,9 +295,6 @@ class TextField : public PageComponent, public ActionListenerList {
 
         // returns 0 if character completely forbidden by field rules
         unsigned char processCharacter( unsigned char inASCII );
-        
-        int getElementBeforeNumber(int val);
-        void insertCharIndex(int val);
 
         // clever (!) way of handling focus?
 
