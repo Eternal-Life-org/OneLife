@@ -144,7 +144,9 @@ int bakeSprite( const char *inTag,
                 doublePair *inSpritePos,
                 double *inSpriteRot,
                 char *inSpriteHFlips,
-                FloatRGB *inSpriteColors );
+                FloatRGB *inSpriteColors,
+                // per-sprite additive blend flags, or NULL for none
+                char *inSpriteAdditiveBlend = NULL );
 
 
                 

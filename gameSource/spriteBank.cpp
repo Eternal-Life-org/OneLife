@@ -1266,7 +1266,8 @@ int bakeSprite( const char *inTag,
                 doublePair *inSpritePos,
                 double *inSpriteRot,
                 char *inSpriteHFlips,
-                FloatRGB *inSpriteColors ) {
+                FloatRGB *inSpriteColors,
+                char *inSpriteAdditiveBlend ) {
     
     File spritesDir( NULL, "sprites" );
             
@@ -1403,6 +1404,13 @@ int bakeSprite( const char *inTag,
             
             FloatRGB spriteColor = inSpriteColors[i];
 
+            // must be read here, before per-pixel loop below declares
+            // its own pixel index variable named i
+            char additive = false;
+            if( inSpriteAdditiveBlend != NULL ) {
+                additive = inSpriteAdditiveBlend[i];
+                }
+
             float spriteColorParts[3] = {
                 spriteColor.r,
                 spriteColor.g,
@@ -1483,7 +1491,31 @@ int bakeSprite( const char *inTag,
                     
                     int baseI = baseY * baseW + baseX;
                     
-                    if( ! spriteRec->multiplicativeBlend ) {
+                    if( additive ) {
+                        // additive blend, replicating OpenGL
+                        // glBlendFunc( GL_SRC_ALPHA, GL_ONE )
+                        // result = dest + source_alpha * source_color
+                        // note that this will NOT work perfectly
+                        // if additive sprite hangs out beyond the border
+                        // of opaque parts below it (those pixels will
+                        // be semi-transparent in the baked result and
+                        // will not glow against what is behind them)
+                        for( int c=0; c<3; c++ ) {
+                            baseChan[c][baseI] +=
+                                chan[3][i] * chan[c][i] *
+                                spriteColorParts[c];
+                            if( baseChan[c][baseI] > 1.0 ) {
+                                baseChan[c][baseI] = 1.0;
+                                }
+                            }
+
+                        // add alphas
+                        baseChan[3][baseI] += chan[3][i];
+                        if( baseChan[3][baseI] > 1.0 ) {
+                            baseChan[3][baseI] = 1.0;
+                            }
+                        }
+                    else if( ! spriteRec->multiplicativeBlend ) {
                         
                         for( int c=0; c<3; c++ ) {
                             // blend dest and source using source alpha
