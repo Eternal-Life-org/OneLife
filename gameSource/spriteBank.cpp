@@ -1519,24 +1519,20 @@ int bakeSprite( const char *inTag,
                             else {
                                 // semi-transparent base below (glass-like
                                 // additive sprite with no opaque backing):
-                                // a plain alpha-blended sprite cannot add
-                                // light to whatever is behind it.  Bake the
-                                // color as displayed on the light editor
-                                // canvas (0.8 gray), so the result keeps the
-                                // bright translucent look instead of
-                                // turning into a dark ghost
-                                double canvasColor = 0.8;
-
+                                // store weighted straight source colors
+                                // with accumulated alpha, so that when the
+                                // baked sprite is re-flagged as Additive
+                                // Blend in an object, its rendering
+                                // (background + alpha * baked color) is
+                                // pixel-identical to the original object
                                 for( int c=0; c<3; c++ ) {
-                                    double displayed =
-                                        ( 1 - baseAlpha ) * canvasColor +
-                                        baseAlpha * baseChan[c][baseI] +
-                                        srcAlpha * chan[c][i] *
-                                        spriteColorParts[c];
-                                    if( displayed > 1.0 ) {
-                                        displayed = 1.0;
+                                    baseChan[c][baseI] =
+                                        ( baseAlpha * baseChan[c][baseI] +
+                                          srcAlpha * chan[c][i] *
+                                          spriteColorParts[c] ) / newAlpha;
+                                    if( baseChan[c][baseI] > 1.0 ) {
+                                        baseChan[c][baseI] = 1.0;
                                         }
-                                    baseChan[c][baseI] = displayed;
                                     }
                                 }
 
