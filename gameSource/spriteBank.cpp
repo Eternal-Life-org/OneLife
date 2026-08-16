@@ -1495,24 +1495,49 @@ int bakeSprite( const char *inTag,
                         // additive blend, replicating OpenGL
                         // glBlendFunc( GL_SRC_ALPHA, GL_ONE )
                         // result = dest + source_alpha * source_color
-                        // note that this will NOT work perfectly
-                        // if additive sprite hangs out beyond the border
-                        // of opaque parts below it (those pixels will
-                        // be semi-transparent in the baked result and
-                        // will not glow against what is behind them)
-                        for( int c=0; c<3; c++ ) {
-                            baseChan[c][baseI] +=
-                                chan[3][i] * chan[c][i] *
-                                spriteColorParts[c];
-                            if( baseChan[c][baseI] > 1.0 ) {
-                                baseChan[c][baseI] = 1.0;
-                                }
-                            }
+                        double srcAlpha = chan[3][i];
 
-                        // add alphas
-                        baseChan[3][baseI] += chan[3][i];
-                        if( baseChan[3][baseI] > 1.0 ) {
-                            baseChan[3][baseI] = 1.0;
+                        if( srcAlpha > 0 ) {
+                            double baseAlpha = baseChan[3][baseI];
+                            double newAlpha = baseAlpha + srcAlpha;
+                            if( newAlpha > 1.0 ) {
+                                newAlpha = 1.0;
+                                }
+
+                            if( baseAlpha >= 1.0 ) {
+                                // opaque base below:
+                                // pure additive, same as on-screen result
+                                for( int c=0; c<3; c++ ) {
+                                    baseChan[c][baseI] +=
+                                        srcAlpha * chan[c][i] *
+                                        spriteColorParts[c];
+                                    if( baseChan[c][baseI] > 1.0 ) {
+                                        baseChan[c][baseI] = 1.0;
+                                        }
+                                    }
+                                }
+                            else {
+                                // semi-transparent base below (glass-like
+                                // additive sprite with no opaque backing):
+                                // its glow comes from adding light to
+                                // whatever is behind it, which a baked
+                                // alpha-blended sprite cannot reproduce.
+                                // keep straight source colors weighted by
+                                // coverage instead, the way hand-drawn
+                                // glass art is authored, so the result
+                                // stays bright instead of turning dark
+                                for( int c=0; c<3; c++ ) {
+                                    baseChan[c][baseI] =
+                                        ( baseAlpha * baseChan[c][baseI] +
+                                          srcAlpha * chan[c][i] *
+                                          spriteColorParts[c] ) / newAlpha;
+                                    if( baseChan[c][baseI] > 1.0 ) {
+                                        baseChan[c][baseI] = 1.0;
+                                        }
+                                    }
+                                }
+
+                            baseChan[3][baseI] = newAlpha;
                             }
                         }
                     else if( ! spriteRec->multiplicativeBlend ) {
