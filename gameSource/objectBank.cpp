@@ -4338,6 +4338,11 @@ HoldingPos drawObject( ObjectRecord *inObject, int inDrawBehindSlots,
             if( inObject->spriteAdditiveBlend != NULL ) {
                 additive = inObject->spriteAdditiveBlend[i];
                 }
+            // sprite-level additive flag (set by bakeSprite for baked
+            // additive layers) also applies here
+            if( ! additive ) {
+                additive = getUsesAdditiveBlending( inObject->sprites[i] );
+                }
             if( additive ) {
                 toggleAdditiveBlend( true );
                 }

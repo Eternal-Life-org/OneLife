@@ -339,9 +339,11 @@ float initSpriteBankStep() {
 
             r->centerXOffset = 0;
             r->centerYOffset = 0;
-        
+
             r->centerAnchorXOffset = 0;
             r->centerAnchorYOffset = 0;
+
+            r->additiveBlend = false;
 
             if( contents != NULL ) {
             
@@ -386,6 +388,15 @@ float initSpriteBankStep() {
 
                     sscanf( tokens->getElementDirect( 3 ),
                             "%d", &( r->centerAnchorYOffset ) );
+                    }
+
+                if( numTokens >= 5 ) {
+                    int additive;
+                    sscanf( tokens->getElementDirect( 4 ),
+                            "%d", &additive );
+                    if( additive == 1 ) {
+                        r->additiveBlend = true;
+                        }
                     }
             
 
@@ -761,6 +772,16 @@ char getUsesMultiplicativeBlending( int inID ) {
         }
     return false;
     }
+
+
+char getUsesAdditiveBlending( int inID ) {
+    if( inID < mapSize ) {
+        if( idMap[inID] != NULL ) {
+            return idMap[inID]->additiveBlend;
+            }
+        }
+    return false;
+    }
     
 
 
@@ -992,7 +1013,8 @@ int addSprite( const char *inTag, SpriteHandle inSprite,
                Image *inSourceImage,
                char inMultiplicativeBlending,
                int inCenterAnchorXOffset,
-               int inCenterAnchorYOffset ) {
+               int inCenterAnchorYOffset,
+               char inAdditiveBlending ) {
 
     int maxD = inSourceImage->getWidth();
     
@@ -1078,10 +1100,19 @@ int addSprite( const char *inTag, SpriteHandle inSprite,
         if( inMultiplicativeBlending ) {
             multFlag = 1;
             }
-        
-        char *metaContents = autoSprintf( "%s %d %d %d", inTag, multFlag,
-                                          inCenterAnchorXOffset, 
-                                          inCenterAnchorYOffset );
+
+        char *metaContents;
+        if( inAdditiveBlending ) {
+            // 5th field: additive blend flag
+            metaContents = autoSprintf( "%s %d %d %d 1", inTag, multFlag,
+                                        inCenterAnchorXOffset,
+                                        inCenterAnchorYOffset );
+            }
+        else {
+            metaContents = autoSprintf( "%s %d %d %d", inTag, multFlag,
+                                        inCenterAnchorXOffset,
+                                        inCenterAnchorYOffset );
+            }
 
         metaFile->writeToFile( metaContents );
         
@@ -1156,6 +1187,7 @@ int addSprite( const char *inTag, SpriteHandle inSprite,
     r->tag = stringDuplicate( inTag );
     r->maxD = maxD;
     r->multiplicativeBlend = inMultiplicativeBlending;
+    r->additiveBlend = inAdditiveBlending;
     
 
     r->w = inSourceImage->getWidth();
@@ -1266,7 +1298,8 @@ int bakeSprite( const char *inTag,
                 doublePair *inSpritePos,
                 double *inSpriteRot,
                 char *inSpriteHFlips,
-                FloatRGB *inSpriteColors ) {
+                FloatRGB *inSpriteColors,
+                char *inSpriteAdditiveBlend ) {
     
     File spritesDir( NULL, "sprites" );
             
@@ -1276,6 +1309,9 @@ int bakeSprite( const char *inTag,
     
     int *xOffsets = new int[ inNumSprites ];
     int *yOffsets = new int[ inNumSprites ];
+
+    char anyAdditive = false;
+    char anyNormal = false;
 
 
     for( int i=0; i<inNumSprites; i++ ) {
@@ -1329,6 +1365,17 @@ int bakeSprite( const char *inTag,
     double *baseChan[4];
     for( int c=0; c<4; c++ ) {
         baseChan[c] = baseImage.getChannel( c );
+        }
+
+    // separate accumulation of additive-blend contributions, so that
+    // objects mixing normal and additive layers can be baked into
+    // two sprites (a normal one and a glow one) instead of one sprite
+    // where the normal parts would wrongly glow too
+    Image glowImage( baseW, baseH, 4, true );
+
+    double *glowChan[4];
+    for( int c=0; c<4; c++ ) {
+        glowChan[c] = glowImage.getChannel( c );
         }
             
     
@@ -1402,6 +1449,24 @@ int bakeSprite( const char *inTag,
                 }
             
             FloatRGB spriteColor = inSpriteColors[i];
+
+            // must be read here, before per-pixel loop below declares
+            // its own pixel index variable named i
+            char additive = false;
+            if( inSpriteAdditiveBlend != NULL ) {
+                additive = inSpriteAdditiveBlend[i];
+                }
+            // sprite-level additive flag (from a previously-baked
+            // glow sprite) also applies
+            if( ! additive && spriteRec->additiveBlend ) {
+                additive = true;
+                }
+            if( additive ) {
+                anyAdditive = true;
+                }
+            else {
+                anyNormal = true;
+                }
 
             float spriteColorParts[3] = {
                 spriteColor.r,
@@ -1483,16 +1548,69 @@ int bakeSprite( const char *inTag,
                     
                     int baseI = baseY * baseW + baseX;
                     
-                    if( ! spriteRec->multiplicativeBlend ) {
-                        
+                    if( additive ) {
+                        // additive blend, replicating OpenGL
+                        // glBlendFunc( GL_SRC_ALPHA, GL_ONE )
+                        // result = dest + source_alpha * source_color
+                        // accumulates in the separate glow image, which
+                        // is saved as its own additive-blend sprite and
+                        // must be drawn ON TOP of the normal one
+                        double srcAlpha = chan[3][i];
+
+                        if( srcAlpha > 0 ) {
+                            double glowAlpha = glowChan[3][baseI];
+                            double newAlpha = glowAlpha + srcAlpha;
+                            if( newAlpha > 1.0 ) {
+                                newAlpha = 1.0;
+                                }
+
+                            if( glowAlpha >= 1.0 ) {
+                                // glow already fully saturated below:
+                                // pure additive accumulation
+                                for( int c=0; c<3; c++ ) {
+                                    glowChan[c][baseI] +=
+                                        srcAlpha * chan[c][i] *
+                                        spriteColorParts[c];
+                                    if( glowChan[c][baseI] > 1.0 ) {
+                                        glowChan[c][baseI] = 1.0;
+                                        }
+                                    }
+                                }
+                            else {
+                                // store weighted straight source colors
+                                // with accumulated alpha, so that additive
+                                // rendering of the baked glow sprite
+                                // (background + alpha * baked color) is
+                                // pixel-identical to the original layers
+                                for( int c=0; c<3; c++ ) {
+                                    glowChan[c][baseI] =
+                                        ( glowAlpha * glowChan[c][baseI] +
+                                          srcAlpha * chan[c][i] *
+                                          spriteColorParts[c] ) / newAlpha;
+                                    if( glowChan[c][baseI] > 1.0 ) {
+                                        glowChan[c][baseI] = 1.0;
+                                        }
+                                    }
+                                }
+
+                            glowChan[3][baseI] = newAlpha;
+                            }
+                        }
+                    else if( ! spriteRec->multiplicativeBlend ) {
+
+                        // a normal layer drawn here blends over the
+                        // framebuffer, dimming whatever glow was
+                        // accumulated below it by its coverage
+                        glowChan[3][baseI] *= ( 1 - chan[3][i] );
+
                         for( int c=0; c<3; c++ ) {
                             // blend dest and source using source alpha
                             // as weight
-                            baseChan[c][baseI] = 
+                            baseChan[c][baseI] =
                                 (1 - chan[3][i] ) * baseChan[c][baseI] +
                                 chan[3][i] * chan[c][i] * spriteColorParts[c];
                             }
-                        
+
                         // add alphas
                         baseChan[3][baseI] += chan[3][i];
                         if( baseChan[3][baseI] > 1.0 ) {
@@ -1512,6 +1630,9 @@ int bakeSprite( const char *inTag,
                             // parts below it.
                             for( int c=0; c<3; c++ ) {
                                 baseChan[c][baseI] *= chan[c][i];
+                                // multiplies the whole framebuffer,
+                                // including glow accumulated so far
+                                glowChan[c][baseI] *= chan[c][i];
                                 }
                             }
                         }
@@ -1524,21 +1645,53 @@ int bakeSprite( const char *inTag,
     
     delete [] xOffsets;
     delete [] yOffsets;
+
+    // absorb glow into OPAQUE parts of the base image:
+    // an opaque base pixel covers the background entirely, so baking
+    // its glow contribution into its color (color += alpha*glowColor)
+    // reproduces the same result no matter which of the two baked
+    // sprites is drawn first, making those pixels order-independent.
+    // Glow over semi-transparent base pixels cannot be absorbed
+    // (additive light must be drawn on top of what it adds to) and
+    // stays in the glow sprite, which must sit above the normal one.
+    for( int p=0; p<baseW*baseH; p++ ) {
+        if( baseChan[3][p] >= 1.0 && glowChan[3][p] > 0.0 ) {
+            for( int c=0; c<3; c++ ) {
+                baseChan[c][p] += glowChan[3][p] * glowChan[c][p];
+                if( baseChan[c][p] > 1.0 ) {
+                    baseChan[c][p] = 1.0;
+                    }
+                }
+            glowChan[3][p] = 0.0;
+            }
+        }
     
-    // find max extent of non-transparent area
+    // find max extent of non-transparent area, across BOTH images,
+    // so both sprites get the same trim rect and center anchor and
+    // line up when stacked in an object
 
     int maxX = 0;
     int minX = baseW - 1;
-    
+
     int maxY = 0;
     int minY = baseH - 1;
+
+    char baseHasPixels = false;
+    char glowHasPixels = false;
 
     for( int y=0; y<baseH; y++ ) {
         for( int x=0; x<baseW; x++ ) {
             int i = y * baseW + x;
-            
+
             if( baseChan[3][i] > 0.0 ) {
-                
+                baseHasPixels = true;
+                }
+            if( glowChan[3][i] > 0.0 ) {
+                glowHasPixels = true;
+                }
+
+            if( baseChan[3][i] > 0.0 || glowChan[3][i] > 0.0 ) {
+
                 if( x > maxX  ) {
                     maxX = x;
                     }
@@ -1551,45 +1704,99 @@ int bakeSprite( const char *inTag,
                 if( y < minY ) {
                     minY = y;
                     }
-                
+
                 }
             }
         }
-    
+
     int newCenterX = ( maxX + minX ) / 2;
     int newCenterY = ( maxY + minY ) / 2;
-    
+
     int centerAnchorXOffset = baseCenterX - newCenterX - 1;
     int centerAnchorYOffset = baseCenterY - newCenterY - 1;
 
     Image *trimmed = baseImage.getSubImage( minX, minY,
                                             1 + maxX - minX, 1 + maxY - minY );
-    
+
+    Image *trimmedGlow = glowImage.getSubImage( minX, minY,
+                                                1 + maxX - minX,
+                                                1 + maxY - minY );
+
     int w = 1;
     int h = 1;
-                    
+
     while( w < trimmed->getWidth() ) {
         w *= 2;
         }
     while( h < trimmed->getHeight() ) {
         h *= 2;
         }
-    
+
     Image *expanded = trimmed->expandImage( w, h );
+    Image *expandedGlow = trimmedGlow->expandImage( w, h );
 
     delete trimmed;
+    delete trimmedGlow;
 
 
-    SpriteHandle s = fillSprite( expanded, false );
-    
-    int returnID = 
-        addSprite( inTag, s, 
-                   expanded,
-                   false,
-                   centerAnchorXOffset, centerAnchorYOffset );
-    
+    int returnID = -1;
+
+    if( anyNormal && baseHasPixels ) {
+        // the normal (non-glow) parts
+        SpriteHandle s = fillSprite( expanded, false );
+
+        returnID = addSprite( inTag, s,
+                              expanded,
+                              false,
+                              centerAnchorXOffset, centerAnchorYOffset,
+                              false );
+        }
+
+    if( anyAdditive && glowHasPixels ) {
+        SpriteHandle sGlow = fillSprite( expandedGlow, false );
+
+        // mixed objects: glow sprite gets a _glow suffix so it can be
+        // told apart from the normal one when stacking them;
+        // glow-only objects (like pure glass) keep the plain tag
+        char *glowTag;
+        if( returnID == -1 ) {
+            glowTag = stringDuplicate( inTag );
+            }
+        else {
+            glowTag = autoSprintf( "%s_glow", inTag );
+            }
+
+        // additive-blend sprite: place it in a layer ABOVE the normal
+        // baked sprite in an object to reproduce the original stacking
+        int glowID = addSprite( glowTag, sGlow,
+                                expandedGlow,
+                                false,
+                                centerAnchorXOffset, centerAnchorYOffset,
+                                true );
+
+        delete [] glowTag;
+
+        if( returnID == -1 ) {
+            // glow-only object: single glow sprite
+            returnID = glowID;
+            }
+        }
+
+    if( returnID == -1 ) {
+        // nothing visible baked (shouldn't happen): still save the
+        // normal image so a sprite exists to return
+        SpriteHandle s = fillSprite( expanded, false );
+
+        returnID = addSprite( inTag, s,
+                              expanded,
+                              false,
+                              centerAnchorXOffset, centerAnchorYOffset,
+                              false );
+        }
+
     delete expanded;
-    
+    delete expandedGlow;
+
     return returnID;
     }
 

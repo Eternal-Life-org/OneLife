@@ -52,12 +52,18 @@ class SpritePickable : public Pickable {
             SpriteHandle sprite = getSprite( r->id );
 
             double zoom = 1;
-            
+
             if( r->maxD > 64 ) {
                 zoom = 64.0 / r->maxD;
                 }
-            
+
+            if( r->additiveBlend ) {
+                toggleAdditiveBlend( true );
+                }
             drawSprite( sprite, inPos, zoom );
+            if( r->additiveBlend ) {
+                toggleAdditiveBlend( false );
+                }
             }
 
 
