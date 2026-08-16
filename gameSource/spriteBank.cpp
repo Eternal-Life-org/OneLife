@@ -1645,6 +1645,26 @@ int bakeSprite( const char *inTag,
     
     delete [] xOffsets;
     delete [] yOffsets;
+
+    // absorb glow into OPAQUE parts of the base image:
+    // an opaque base pixel covers the background entirely, so baking
+    // its glow contribution into its color (color += alpha*glowColor)
+    // reproduces the same result no matter which of the two baked
+    // sprites is drawn first, making those pixels order-independent.
+    // Glow over semi-transparent base pixels cannot be absorbed
+    // (additive light must be drawn on top of what it adds to) and
+    // stays in the glow sprite, which must sit above the normal one.
+    for( int p=0; p<baseW*baseH; p++ ) {
+        if( baseChan[3][p] >= 1.0 && glowChan[3][p] > 0.0 ) {
+            for( int c=0; c<3; c++ ) {
+                baseChan[c][p] += glowChan[3][p] * glowChan[c][p];
+                if( baseChan[c][p] > 1.0 ) {
+                    baseChan[c][p] = 1.0;
+                    }
+                }
+            glowChan[3][p] = 0.0;
+            }
+        }
     
     // find max extent of non-transparent area, across BOTH images,
     // so both sprites get the same trim rect and center anchor and
