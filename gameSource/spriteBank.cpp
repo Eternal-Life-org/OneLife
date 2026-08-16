@@ -1519,21 +1519,24 @@ int bakeSprite( const char *inTag,
                             else {
                                 // semi-transparent base below (glass-like
                                 // additive sprite with no opaque backing):
-                                // its glow comes from adding light to
-                                // whatever is behind it, which a baked
-                                // alpha-blended sprite cannot reproduce.
-                                // keep straight source colors weighted by
-                                // coverage instead, the way hand-drawn
-                                // glass art is authored, so the result
-                                // stays bright instead of turning dark
+                                // a plain alpha-blended sprite cannot add
+                                // light to whatever is behind it.  Bake the
+                                // color as displayed on the light editor
+                                // canvas (0.8 gray), so the result keeps the
+                                // bright translucent look instead of
+                                // turning into a dark ghost
+                                double canvasColor = 0.8;
+
                                 for( int c=0; c<3; c++ ) {
-                                    baseChan[c][baseI] =
-                                        ( baseAlpha * baseChan[c][baseI] +
-                                          srcAlpha * chan[c][i] *
-                                          spriteColorParts[c] ) / newAlpha;
-                                    if( baseChan[c][baseI] > 1.0 ) {
-                                        baseChan[c][baseI] = 1.0;
+                                    double displayed =
+                                        ( 1 - baseAlpha ) * canvasColor +
+                                        baseAlpha * baseChan[c][baseI] +
+                                        srcAlpha * chan[c][i] *
+                                        spriteColorParts[c];
+                                    if( displayed > 1.0 ) {
+                                        displayed = 1.0;
                                         }
+                                    baseChan[c][baseI] = displayed;
                                     }
                                 }
 
