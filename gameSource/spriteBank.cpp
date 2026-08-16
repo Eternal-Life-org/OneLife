@@ -339,9 +339,11 @@ float initSpriteBankStep() {
 
             r->centerXOffset = 0;
             r->centerYOffset = 0;
-        
+
             r->centerAnchorXOffset = 0;
             r->centerAnchorYOffset = 0;
+
+            r->additiveBlend = false;
 
             if( contents != NULL ) {
             
@@ -386,6 +388,15 @@ float initSpriteBankStep() {
 
                     sscanf( tokens->getElementDirect( 3 ),
                             "%d", &( r->centerAnchorYOffset ) );
+                    }
+
+                if( numTokens >= 5 ) {
+                    int additive;
+                    sscanf( tokens->getElementDirect( 4 ),
+                            "%d", &additive );
+                    if( additive == 1 ) {
+                        r->additiveBlend = true;
+                        }
                     }
             
 
@@ -761,6 +772,16 @@ char getUsesMultiplicativeBlending( int inID ) {
         }
     return false;
     }
+
+
+char getUsesAdditiveBlending( int inID ) {
+    if( inID < mapSize ) {
+        if( idMap[inID] != NULL ) {
+            return idMap[inID]->additiveBlend;
+            }
+        }
+    return false;
+    }
     
 
 
@@ -992,7 +1013,8 @@ int addSprite( const char *inTag, SpriteHandle inSprite,
                Image *inSourceImage,
                char inMultiplicativeBlending,
                int inCenterAnchorXOffset,
-               int inCenterAnchorYOffset ) {
+               int inCenterAnchorYOffset,
+               char inAdditiveBlending ) {
 
     int maxD = inSourceImage->getWidth();
     
@@ -1078,10 +1100,19 @@ int addSprite( const char *inTag, SpriteHandle inSprite,
         if( inMultiplicativeBlending ) {
             multFlag = 1;
             }
-        
-        char *metaContents = autoSprintf( "%s %d %d %d", inTag, multFlag,
-                                          inCenterAnchorXOffset, 
-                                          inCenterAnchorYOffset );
+
+        char *metaContents;
+        if( inAdditiveBlending ) {
+            // 5th field: additive blend flag
+            metaContents = autoSprintf( "%s %d %d %d 1", inTag, multFlag,
+                                        inCenterAnchorXOffset,
+                                        inCenterAnchorYOffset );
+            }
+        else {
+            metaContents = autoSprintf( "%s %d %d %d", inTag, multFlag,
+                                        inCenterAnchorXOffset,
+                                        inCenterAnchorYOffset );
+            }
 
         metaFile->writeToFile( metaContents );
         
@@ -1156,6 +1187,7 @@ int addSprite( const char *inTag, SpriteHandle inSprite,
     r->tag = stringDuplicate( inTag );
     r->maxD = maxD;
     r->multiplicativeBlend = inMultiplicativeBlending;
+    r->additiveBlend = inAdditiveBlending;
     
 
     r->w = inSourceImage->getWidth();
@@ -1277,6 +1309,8 @@ int bakeSprite( const char *inTag,
     
     int *xOffsets = new int[ inNumSprites ];
     int *yOffsets = new int[ inNumSprites ];
+
+    char anyAdditive = false;
 
 
     for( int i=0; i<inNumSprites; i++ ) {
@@ -1409,6 +1443,9 @@ int bakeSprite( const char *inTag,
             char additive = false;
             if( inSpriteAdditiveBlend != NULL ) {
                 additive = inSpriteAdditiveBlend[i];
+                }
+            if( additive ) {
+                anyAdditive = true;
                 }
 
             float spriteColorParts[3] = {
@@ -1638,11 +1675,12 @@ int bakeSprite( const char *inTag,
 
     SpriteHandle s = fillSprite( expanded, false );
     
-    int returnID = 
-        addSprite( inTag, s, 
+    int returnID =
+        addSprite( inTag, s,
                    expanded,
                    false,
-                   centerAnchorXOffset, centerAnchorYOffset );
+                   centerAnchorXOffset, centerAnchorYOffset,
+                   anyAdditive );
     
     delete expanded;
     
