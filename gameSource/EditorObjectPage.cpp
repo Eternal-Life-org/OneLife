@@ -2113,7 +2113,8 @@ void EditorObjectPage::actionPerformed( GUIComponent *inTarget ) {
                                 mCurrentObject.spritePos,
                                 mCurrentObject.spriteRot,
                                 mCurrentObject.spriteHFlip,
-                                mCurrentObject.spriteColor );
+                                mCurrentObject.spriteColor,
+                                mCurrentObject.spriteAdditiveBlend );
         
         spritePickable.usePickable( newID );
 
@@ -3892,9 +3893,15 @@ void EditorObjectPage::drawSpriteLayers( doublePair inDrawOffset,
         float alpha = 1;
 
 
-        char multiplicative = 
+        char multiplicative =
             getUsesMultiplicativeBlending( mCurrentObject.sprites[i] );
         char additive = mCurrentObject.spriteAdditiveBlend[i];
+
+        // sprite-level additive flag (set by bakeSprite for baked
+        // additive layers) also applies here
+        if( ! additive ) {
+            additive = getUsesAdditiveBlending( mCurrentObject.sprites[i] );
+            }
         
         
         if( mHoverObjectLayer == i && mHoverStrength > 0 ) {

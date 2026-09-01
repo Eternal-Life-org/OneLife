@@ -763,6 +763,100 @@ static void addToYummyFoodChain( int foodID ) {
     yummyFoodChain.push_back( foodID );
     }
 
+
+// 从物品描述中提取 +yum 组目标 ID
+// 格式：+yumXXX 表示此食物与 ID=XXX 的食物属于同一 yum 组
+// 支持 category 母物品继承
+// 返回目标 ID，若未找到则返回 -1
+static int getYumTargetID( int inObjectID ) {
+    ObjectRecord *o = getObject( inObjectID, true );
+    if( o == NULL ) return -1;
+
+    // 首先检查物品自己的描述
+    char *yumLoc = strstr( o->description, "+yum" );
+    if( yumLoc != NULL ) {
+        int targetID;
+        if( sscanf( yumLoc, "+yum%d", &targetID ) == 1 ) {
+            return targetID;
+            }
+        }
+
+    // 若物品自己没有标签，检查 category 母物品（category 继承）
+    ReverseCategoryRecord *revCat = getReverseCategory( inObjectID );
+    if( revCat != NULL ) {
+        for( int i=0; i<revCat->categoryIDSet.size(); i++ ) {
+            int catID = revCat->categoryIDSet.getElementDirect( i );
+            CategoryRecord *cat = getCategory( catID );
+            if( cat != NULL ) {
+                ObjectRecord *catObj = getObject( cat->parentID, true );
+                if( catObj != NULL ) {
+                    yumLoc = strstr( catObj->description, "+yum" );
+                    if( yumLoc != NULL ) {
+                        int targetID;
+                        if( sscanf( yumLoc, "+yum%d", &targetID ) == 1 ) {
+                            return targetID;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+    return -1;
+    }
+
+
+// 传递性地解析 yum 组根节点
+// 跟随 +yum 标签链直到无标签的食物（根节点）或检测到循环
+// 循环时使用 visited 中最小 ID 作为确定性根节点
+static int resolveYumGroup( int inObjectID ) {
+    SimpleVector<int> visited;
+    int current = inObjectID;
+
+    while( true ) {
+        if( visited.getElementIndex( current ) != -1 ) {
+            int minID = current;
+            for( int i=0; i<visited.size(); i++ ) {
+                int id = visited.getElementDirect( i );
+                if( id < minID ) minID = id;
+                }
+            return minID;
+            }
+        visited.push_back( current );
+
+        int target = getYumTargetID( current );
+        if( target == -1 ) {
+            return current;
+            }
+        current = target;
+        }
+    }
+
+
+// 检查给定食物是否已在 yum 链中（包括 +yum 组等价，传递性）
+// 用于 yum finder 判断食物是 yum 还是 meh
+static char isFoodInYummyChain( int inFoodParentID ) {
+    // 直接 ID 匹配（快速路径）
+    if( yummyFoodChain.getElementIndex( inFoodParentID ) != -1 ) {
+        return true;
+        }
+
+    // +yum 组等价检查（传递性）
+    int foodGroupRoot = resolveYumGroup( inFoodParentID );
+
+    for( int i=0; i<yummyFoodChain.size(); i++ ) {
+        int chainFoodID = yummyFoodChain.getElementDirect( i );
+        int chainGroupRoot = resolveYumGroup( chainFoodID );
+
+        if( foodGroupRoot == chainGroupRoot ) {
+            return true;
+            }
+        }
+
+    return false;
+    }
+
+
 char livingLifeBouncingYOffsetToggle = true;
 
 void setLivingLifeBouncingYOffsetToggle( char b ) {
@@ -781,7 +875,7 @@ float getLivingLifeBouncingYOffset( int oid ) {
     int foodParentID = getFoodParent( oid );
     char yumHit = 
         yumFinderEnabled && runningYumFinder && isFood( foodParentID ) && 
-        yummyFoodChain.getElementIndex( foodParentID ) == -1;
+        ! isFoodInYummyChain( foodParentID );
 
     if( !yumHit && !objectSearchHit ) return 0.0;
 

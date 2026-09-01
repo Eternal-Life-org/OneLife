@@ -528,7 +528,10 @@ void initFrameDrawer( int inWidth, int inHeight, int inTargetFrameRate,
     setSoundSpriteVolumeRange( 0.60, 1.0 );
     
     initOverlayBankStart();
-    
+
+
+    // normal clipboard shortcuts (ctrl-c/v/x/a) in every text field
+    TextField::setPasteShortcutForNewFields( true );
 
     importPage = new EditorImportPage;
     spriteTrimPage = new EditorSpriteTrimPage;

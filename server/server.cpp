@@ -299,10 +299,6 @@ void temp_passwordRecordTransfer() {
     }    
 
 
-static SimpleVector<char*> infertilityDeclaringPhrases;
-static SimpleVector<char*> fertilityDeclaringPhrases;
-
-
 
 
 static char *eveName = NULL;
@@ -549,6 +545,10 @@ typedef struct FreshConnection {
         char *twinCode;
         int twinCount;
         char playerListSent;
+        char liveStreamSent;
+
+        // LVO 直播观察:经 LVOLOGIN 登录时,要观看的主播 p_id(<0 表示普通 LOGIN)。
+        int liveViewTargetID;
 
         int mMapD;
     } FreshConnection;
@@ -917,6 +917,10 @@ typedef struct LiveObject {
         
         bool declaredInfertile;
 
+        // 直播 opt-in: 玩家发 STREAM 协议后置 true(只开不关), 非持久, 每条命重置
+        // (仅 LIVE_STREAM 外部查询可见, 场内不广播名字)
+        bool streaming;
+
         timeSec_t lastRegionLookTime;
         
         double playerCrossingCheckTime;
@@ -931,6 +935,17 @@ typedef struct LiveObject {
         char holdingFlightObject;
         
         char vogMode;
+        // LIVE 直播观察模式(只读旁观,管理员用)。进入时 vogMode=true
+        // (复用既有免疫/不可见/场景接收守卫)+ liveViewMode=true(标记只读:
+        // 阻断 VOG* 写命令,只响应 LVO* 命令)。与 VOG 上帝模式权限分离。
+        char liveViewMode;
+        // 直播观察:当前跟随的主播 p_id(-1=未跟随)。服务端据此把观众的地图
+        // 发送位置持续对齐到主播,使增量 MC 围绕主播实时加载(否则观众 xd/yd
+        // 仅在 LVOF 时设一次,主播走远后地图不再加载)。
+        int liveViewTargetID;
+        // 经 LVOLOGIN 进入的纯旁观者标记:永不可经 LVOX 变回普通玩家,
+        // 断连即删(无重返价值)。区别于 liveViewMode(管理员 LVOS 进入可 LVOX 退出)。
+        char spectator;
         GridPos preVogPos;
         GridPos preVogBirthPos;
         int vogJumpIndex;
@@ -1931,9 +1946,7 @@ void quitCleanup() {
     
     youGivingPhrases.deallocateStringElements();
     namedGivingPhrases.deallocateStringElements();
-    infertilityDeclaringPhrases.deallocateStringElements();
-    fertilityDeclaringPhrases.deallocateStringElements();
-    
+
     // password-protected objects
     passwordProtectingPhrases.deallocateStringElements();
     
@@ -2209,6 +2222,14 @@ typedef enum messageType {
     VOGI,
     VOGT,
     VOGX,
+    // LIVE 直播观察协议(只读旁观,与 VOG 上帝模式权限分离,不复用 VOG 接口)
+    LVOS,
+    LVOF,
+    LVOX,
+    // 直播开关 + 生育声明(独立协议,不再复用 SAY 关键词)
+    STREAM,
+    INFERTILE,
+    FERTILE,
     PHOTO,
     FLIP,
     UNKNOWN
@@ -2328,15 +2349,48 @@ ClientMessage parseMessage( LiveObject *inPlayer, char *inMessage ) {
 
     if( numRead != 3 ) {
         
+        if( numRead == 0 ) {
+            // 无参数消息(LVOS/LVOX/STREAM/INFERTILE/FERTILE)没有空格,上面的解析
+            // 不会给 nameBuffer 赋值(栈垃圾),这里补上以命中下面的 strcmp。
+            strncpy( nameBuffer, inMessage, 99 );
+            nameBuffer[99] = '\0';
+            }
+
         if( numRead == 2 &&
             strcmp( nameBuffer, "TRIGGER" ) == 0 ) {
             m.type = TRIGGER;
             m.trigger = m.x;
             }
+        // ---- LVO 直播观察(numRead<3,必须在此处理)----
+        // LVOS/LVOX 无参数(numRead==0);LVOF p_id 一空格(numRead==2)。
+        // 切勿放下面 numRead==3 的 strcmp 链 —— 会被本块 UNKNOWN 兜底吞掉
+        // (表现为服务端日志 "unknown message type")。
+        else if( strcmp( nameBuffer, "LVOS" ) == 0 ) {
+            m.type = LVOS;
+            }
+        else if( strcmp( nameBuffer, "LVOF" ) == 0 ) {
+            m.type = LVOF;
+            sscanf( inMessage, "%99s %d", nameBuffer, &( m.id ) );
+            }
+        else if( strcmp( nameBuffer, "LVOX" ) == 0 ) {
+            m.type = LVOX;
+            }
+        // ---- 直播开关 + 生育声明(0 参,必须在此 numRead!=3 块处理)----
+        // STREAM/INFERTILE/FERTILE 均无参数(numRead==0)。
+        // 切勿放下面 numRead==3 的 strcmp 链 —— 会被本块 UNKNOWN 兜底吞掉。
+        else if( strcmp( nameBuffer, "STREAM" ) == 0 ) {
+            m.type = STREAM;
+            }
+        else if( strcmp( nameBuffer, "INFERTILE" ) == 0 ) {
+            m.type = INFERTILE;
+            }
+        else if( strcmp( nameBuffer, "FERTILE" ) == 0 ) {
+            m.type = FERTILE;
+            }
         else {
             m.type = UNKNOWN;
             }
-        
+
         return m;
         }
     
@@ -2521,12 +2575,19 @@ ClientMessage parseMessage( LiveObject *inPlayer, char *inMessage ) {
         }
     else if( strcmp( nameBuffer, "DROP" ) == 0 ) {
         m.type = DROP;
-        numRead = sscanf( inMessage, 
-                          "%99s %d %d %d", 
-                          nameBuffer, &( m.x ), &( m.y ), &( m.c ) );
-        
-        if( numRead != 4 ) {
+        // 第 5 段可选槽位 i:DROP x y c i = 与穿着容器栈下标 i 精确交换
+        // (m.i 默认 -1 = 旧语义:加顶后从堆底扫描弹一件;旧客户端 4 字段
+        //  消息多余 token 被 sscanf 忽略,天然兼容)
+        numRead = sscanf( inMessage,
+                          "%99s %d %d %d %d",
+                          nameBuffer, &( m.x ), &( m.y ), &( m.c ),
+                          &( m.i ) );
+
+        if( numRead < 4 ) {
             m.type = UNKNOWN;
+            }
+        if( numRead == 4 ) {
+            m.i = -1;
             }
         }
     else if( strcmp( nameBuffer, "KILL" ) == 0 ) {
@@ -2620,6 +2681,7 @@ ClientMessage parseMessage( LiveObject *inPlayer, char *inMessage ) {
     else if( strcmp( nameBuffer, "VOGX" ) == 0 ) {
         m.type = VOGX;
         }
+   // 注:LVO(LVOS/LVOF/LVOX)解析在上方 numRead!=3 块处理(参数数<3)。
    else if( strcmp( nameBuffer, "PHOTO" ) == 0 ) {
         m.type = PHOTO;
         numRead = sscanf( inMessage, 
@@ -3971,6 +4033,11 @@ SimpleVector<MoveRecord> getMoveRecords(
             continue;
             }
 
+        // 旁观者(vogMode)永不移动,排除以免把它的坐标作为 PM 源泄漏给他人。
+        if( o->vogMode ) {
+            continue;
+            }
+
         if( ( o->xd != o->xs || o->yd != o->ys )
             &&
             ( o->newMove || !inNewMovesOnly ) ) {
@@ -4184,6 +4251,32 @@ static void setPlayerDisconnected( LiveObject *inPlayer,
 
     AppLog::infoF( "Player %d (%s) marked as disconnected (%s) in func (%s:%d)",
                    inPlayer->id, inPlayer->email, inReason, func, line );
+
+    // 旁观者无重返价值:断连即标记 error+deleteSent,由 despawn 块本帧/下帧移除;
+    // 跳过下面的 vogMode 清零与 preVogPos 回滚(那是管理员 god-mode 退出用的,
+    // 旁观者回滚会把它丢到 preVogPos 泄漏)。deleteSent=true 同时跳过 delete-PU
+    // 广播块(需 !deleteSent),避免把旁观者的"死亡"广播给所有客户端。
+    if( inPlayer->spectator ) {
+        inPlayer->connected = false;
+        inPlayer->error = true;
+        inPlayer->errorCauseString = inReason;
+        inPlayer->deleteSent = true;
+        inPlayer->deleteSentDoneETA = Time::getCurrentTime();
+        inPlayer->deathTimeSeconds = Time::getCurrentTime();
+
+        if( inPlayer->sock != NULL ) {
+            sockPoll.removeSocket( inPlayer->sock );
+            delete inPlayer->sock;
+            inPlayer->sock = NULL;
+            }
+        if( inPlayer->sockBuffer != NULL ) {
+            delete inPlayer->sockBuffer;
+            inPlayer->sockBuffer = NULL;
+            }
+        return;
+        }
+
+    // just mark them as not connected
     inPlayer->connected = false;
 
     // when player reconnects, they won't get a force PU message
@@ -5064,10 +5157,6 @@ SimpleVector<ChangePosition> newLocationSpeechPos;
 
 char *isCurseNamingSay( char *inSaidString );
 
-char *isInfertilityDeclaringSay( char *inSaidString );
-
-char *isFertilityDeclaringSay( char *inSaidString );
-
 
 // password-protected objects
 char *isPasswordProtectingSay( char *inSaidString );
@@ -5101,13 +5190,6 @@ static void makePlayerSay( LiveObject *inPlayer, char *inToSay, bool inPrivate =
             }
         inPlayer->lastSay = stringDuplicate( inToSay );
         }
-
-
-    if( getFemale( inPlayer ) ) {
-        char *infertilityDeclaring = isInfertilityDeclaringSay( inToSay );
-        char *fertilityDeclaring = isFertilityDeclaringSay( inToSay );
-        if( infertilityDeclaring != NULL || fertilityDeclaring != NULL ) return;
-    }
 
 
     char isCurse = false;
@@ -6157,6 +6239,88 @@ static SimpleVector<int> newEmotIndices;
 static SimpleVector<int> newEmotTTLs;
 
 
+// 格式：+yumXXX 表示此食物与 ID=XXX 的食物属于同一 yum 组
+// 支持 category 母物品继承：若子物品无 +yum 标签，检查其 category 母物品
+// 返回目标 ID，若未找到则返回 -1
+static int getYumTargetID( int inObjectID ) {
+    ObjectRecord *o = getObject( inObjectID );
+    if( o == NULL ) return -1;
+
+    // 首先检查物品自己的描述
+    char *yumLoc = strstr( o->description, "+yum" );
+    if( yumLoc != NULL ) {
+        int targetID;
+        if( sscanf( yumLoc, "+yum%d", &targetID ) == 1 ) {
+            printf( "[+yum] getYumTargetID: object %d has +yum%d (from own description '%s')\n",
+                    inObjectID, targetID, o->description );
+            return targetID;
+            }
+        }
+
+    // 若物品自己没有标签，检查 category 母物品（category 继承）
+    ReverseCategoryRecord *revCat = getReverseCategory( inObjectID );
+    if( revCat != NULL ) {
+        for( int i=0; i<revCat->categoryIDSet.size(); i++ ) {
+            int catID = revCat->categoryIDSet.getElementDirect( i );
+            CategoryRecord *cat = getCategory( catID );
+            if( cat != NULL ) {
+                ObjectRecord *catObj = getObject( cat->parentID );
+                if( catObj != NULL ) {
+                    yumLoc = strstr( catObj->description, "+yum" );
+                    if( yumLoc != NULL ) {
+                        int targetID;
+                        if( sscanf( yumLoc, "+yum%d", &targetID ) == 1 ) {
+                            printf( "[+yum] getYumTargetID: object %d inherits +yum%d from category parent %d ('%s')\n",
+                                    inObjectID, targetID, cat->parentID, catObj->description );
+                            return targetID;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+    return -1;
+    }
+
+
+// 传递性地解析 yum 组根节点
+// 跟随 +yum 标签链直到无标签的食物（根节点）或检测到循环
+// 循环时使用 visited 中最小 ID 作为确定性根节点
+// 同一 yum 组的所有食物会解析到相同的根节点
+static int resolveYumGroup( int inObjectID ) {
+    SimpleVector<int> visited;
+    int current = inObjectID;
+
+    while( true ) {
+        // 检测循环：当前 ID 已在访问路径中
+        if( visited.getElementIndex( current ) != -1 ) {
+            // 找到 visited 中所有循环成员的 ID，取最小值作为根
+            // 这样可以确保从循环中任一节点出发都得到相同的根
+            int minID = current;
+            for( int i=0; i<visited.size(); i++ ) {
+                int id = visited.getElementDirect( i );
+                if( id < minID ) minID = id;
+                }
+            printf( "[+yum] resolveYumGroup: object %d -> cycle detected, root=%d\n",
+                    inObjectID, minID );
+            return minID;
+            }
+        visited.push_back( current );
+
+        int target = getYumTargetID( current );
+        if( target == -1 ) {
+            // 无 +yum 标签，此为根节点
+            if( current != inObjectID ) {
+                printf( "[+yum] resolveYumGroup: object %d -> chain ends at %d\n",
+                        inObjectID, current );
+                }
+            return current;
+            }
+        current = target;
+        }
+    }
+
 
 static char isYummy( LiveObject *inPlayer, int inObjectID ) {
     ObjectRecord *o = getObject( inObjectID );
@@ -6170,6 +6334,9 @@ static char isYummy( LiveObject *inPlayer, int inObjectID ) {
         return false;
         }
 
+    printf( "[+yum] isYummy: checking food %d, description='%s', chainSize=%d\n",
+            inObjectID, o->description, inPlayer->yummyFoodChain.size() );
+
     if( inObjectID == inPlayer->cravingFood.foodID &&
         computeAge( inPlayer ) >= minAgeForCravings ) {
         return true;
@@ -6180,6 +6347,26 @@ static char isYummy( LiveObject *inPlayer, int inObjectID ) {
             return false;
             }
         }
+
+    // +yum 组等价检查（传递性）
+    // 解析新食物的 yum 组根，与链中每个食物的 yum 组根比较
+    // 同一组内的食物共享同一个根节点
+    int newFoodGroupRoot = resolveYumGroup( inObjectID );
+
+    for( int i=0; i<inPlayer->yummyFoodChain.size(); i++ ) {
+        int chainFoodID = inPlayer->yummyFoodChain.getElementDirect( i );
+        int chainGroupRoot = resolveYumGroup( chainFoodID );
+
+        printf( "[+yum] isYummy: comparing new food %d (groupRoot=%d) vs chain food %d (groupRoot=%d)\n",
+                inObjectID, newFoodGroupRoot, chainFoodID, chainGroupRoot );
+
+        if( newFoodGroupRoot == chainGroupRoot ) {
+            printf( "[+yum] isYummy: SAME GROUP -> NOT yum (meh)!\n" );
+            return false;
+            }
+        }
+
+    printf( "[+yum] isYummy: food %d is YUM (no group match in chain)\n", inObjectID );
     return true;
     }
     
@@ -6205,6 +6392,21 @@ static char isReallyYummy( LiveObject *inPlayer, int inObjectID ) {
             return false;
             }
         }
+
+    // +yum 组等价检查（传递性）
+    // 解析新食物的 yum 组根，与链中每个食物的 yum 组根比较
+    // 同一组内的食物共享同一个根节点
+    int newFoodGroupRoot = resolveYumGroup( inObjectID );
+
+    for( int i=0; i<inPlayer->yummyFoodChain.size(); i++ ) {
+        int chainFoodID = inPlayer->yummyFoodChain.getElementDirect( i );
+        int chainGroupRoot = resolveYumGroup( chainFoodID );
+
+        if( newFoodGroupRoot == chainGroupRoot ) {
+            return false;
+            }
+        }
+
     return true;
     }
 
@@ -6464,7 +6666,7 @@ static UpdateRecord getUpdateRecord(
 
     r.formatString = autoSprintf( 
         "%d %d %d %d %%d %%d %s %d %%d %%d %d "
-        "%.2f %s %.2f %.2f %.2f %s %d %d %d %d%s %d %d\n",
+        "%.2f %s %.2f %.2f %.2f %s %d %d %d %d%s %d %d %d\n",
         inPlayer->id,
         inPlayer->displayID,
         inPlayer->facingOverride,
@@ -6489,8 +6691,12 @@ static UpdateRecord getUpdateRecord(
         // 末尾追加 foodStore + yummyBonusStore(foodBonus),供附近视野内玩家可见。
         // 活人 deathReason 为空 → 这两值紧跟 heldYum。旧客户端 sscanf 结尾的死字段
         // heldLearned 会吞掉第一个值(它从不使用),第二个被忽略 → 向后兼容不崩。
+        deathReason,
         inPlayer->foodStore,
-        inPlayer->yummyBonusStore );
+        inPlayer->yummyBonusStore,
+        // foodCapacity:年龄/适应度实时算出的真值(婴儿 3 → 成人 10),修复他人视角
+        // cap 误判 10。旧服务端不传此字段 → 客户端 sscanf 不匹配 → 兜底回 10。
+        computeFoodCapacity( inPlayer ) );
 
     delete [] deathReason;
     
@@ -6574,7 +6780,13 @@ static LiveObject *getHitPlayer( int inX, int inY,
         if( otherPlayer->error ) {
             continue;
             }
-        
+
+        // 旁观者(vogMode)贴在主播格,不可被攻击/野兽命中,否则会触发 delete-PU
+        // 广播(21150)把旁观者泄漏给所有客户端。
+        if( otherPlayer->vogMode ) {
+            continue;
+            }
+
         if( otherPlayer->heldByOther ) {
             // ghost position of a held baby
             continue;
@@ -8279,6 +8491,7 @@ int processLoggedInPlayer( char inAllowReconnect,
     
     newObject.birthCoolDown = 0;
     newObject.declaredInfertile = false;
+    newObject.streaming = false;
     
     newObject.monumentPosSet = false;
     newObject.monumentPosSent = true;
@@ -8286,6 +8499,9 @@ int processLoggedInPlayer( char inAllowReconnect,
     newObject.holdingFlightObject = false;
 
     newObject.vogMode = false;
+    newObject.liveViewMode = false;
+    newObject.liveViewTargetID = -1;
+    newObject.spectator = false;
     newObject.postVogMode = false;
     newObject.vogJumpIndex = 0;
     
@@ -8597,6 +8813,106 @@ int processLoggedInPlayer( char inAllowReconnect,
                    inTutorialNumber, a->mAddressString, seed, newObject.xs, newObject.ys,
                    maxPlacementX );
     
+    return newObject.id;
+    }
+
+
+
+// LVO 直播旁观登录(LVOLOGIN):鉴权同普通登录(已在调用前完成),但不出生玩家本体。
+// 造一个「从出生第一帧即 vogMode+liveViewMode」的只读 LiveObject:
+//   - vogMode 在 push 前置位 → 首条 PU 源过滤(23331)与每帧 PU 过滤(22798)必跳过它
+//     → 永不发自 PU、永不被广播给任何人;
+//   - 仍在 players 内 → 接收侧主循环(23241,无 vogMode 过滤)照常给它发主播视野
+//     (map-send 锚定 liveViewTargetID、PU 距离以主播坐标为准);
+//   - spectator 标记:断连即删、不可经 LVOX 变回普通玩家。
+// 不做正常出生/母职/族谱/Eve/tutorial,故不计入名额(见 maxPlayers 计数)、不消耗生命。
+static int processLiveViewSpectator( Socket *inSock,
+                                     SimpleVector<char> *inSockBuffer,
+                                     char *inEmail,
+                                     FreshConnection *connection,
+                                     int inLiveViewTargetID ) {
+
+    // 校验目标主播:在线、非错误、非旁观、已开直播(streaming)。
+    LiveObject *target = getLiveObject( inLiveViewTargetID );
+    if( target == NULL || target->error || target->vogMode ||
+        ! target->streaming ) {
+        AppLog::infoF( "LVO: LVOLOGIN target=%d invalid "
+                       "(missing/error/vog/!streaming), rejected",
+                       inLiveViewTargetID );
+        const char *rej = "REJECTED\n#";
+        inSock->send( (unsigned char*)rej, strlen( rej ), false, false );
+        return -1;
+        }
+
+    // 值初始化:标量归零、指针 NULL、SimpleVector 成员默认构造;再显式设全。
+    LiveObject newObject = {};
+
+    newObject.id = nextID;
+    nextID++;
+
+    newObject.email = stringDuplicate( inEmail );
+    newObject.origEmail = NULL;
+    newObject.displayID = getRandomPersonObject();
+
+    newObject.vogMode = true;
+    newObject.liveViewMode = true;
+    newObject.spectator = true;
+    newObject.liveViewTargetID = target->id;
+    newObject.connected = true;
+    newObject.error = false;
+    newObject.deleteSent = false;
+    newObject.isEve = false;
+    newObject.isTutorial = false;
+    newObject.lineageEveID = newObject.id;
+    newObject.parentID = -1;
+    newObject.curseStatus = connection->curseStatus;
+    newObject.lifeStats = connection->lifeStats;
+    newObject.fitnessScore = connection->fitnessScore;
+
+    newObject.mMapD = target->mMapD;
+
+    // 位置/出生点对齐主播(出生相对坐标以此为原点,与 PU/MC 坐标系一致)。
+    GridPos p = getPlayerPos( target );
+    newObject.xd = p.x;
+    newObject.yd = p.y;
+    newObject.xs = p.x;
+    newObject.ys = p.y;
+    newObject.birthPos = p;
+    newObject.originalBirthPos = p;
+    newObject.preVogPos = p;
+    newObject.preVogBirthPos = p;
+    newObject.actionTarget = p;
+
+    // vogMode 免食物衰减,此值永不外发(无自 PU/FX),仅占位。
+    newObject.foodStore = 20;
+
+    newObject.lifeStartTimeSeconds = Time::getCurrentTime();
+    newObject.trueStartTimeSeconds = Time::getCurrentTime();
+    newObject.deathTimeSeconds = 0;
+
+    newObject.sock = inSock;
+    newObject.sockBuffer = inSockBuffer;
+    newObject.firstMessageSent = false;
+    newObject.firstMapSent = false;
+
+    // despawn 清理路径(25300-25360)无条件 delete 的指针成员,必须分配。
+    newObject.lineage = new SimpleVector<int>();
+    newObject.ancestorIDs = new SimpleVector<int>();
+    newObject.ancestorEmails = new SimpleVector<char*>();
+    newObject.ancestorRelNames = new SimpleVector<char*>();
+    newObject.ancestorLifeStartTimeSeconds = new SimpleVector<double>();
+    newObject.ancestorLifeEndTimeSeconds = new SimpleVector<double>();
+    newObject.babyBirthTimes = new SimpleVector<timeSec_t>();
+    newObject.babyIDs = new SimpleVector<int>();
+
+    players.push_back( newObject );
+
+    HostAddress *a = inSock->getRemoteHostAddress();
+    AppLog::infoF( "LVO: spectator %s connected as player %d "
+                   "(liveView target=%d, IP:%s) — no world body, no slot",
+                   newObject.email, newObject.id, target->id,
+                   a->mAddressString );
+
     return newObject.id;
     }
 
@@ -9952,6 +10268,75 @@ static char addHeldToClothingContainer( LiveObject *inPlayer,
 
 
 
+// 与穿着容器栈下标 inI 精确交换:contained[i] <-> 手持,原位互换不动其他格
+// (动作轮盘 DROP x y c i 语义;纯互换,不执行容器转移 contTrans)
+static char swapHeldIntoClothingContainerSlot( LiveObject *inPlayer,
+                                               int inC,
+                                               int inI ) {
+    ObjectRecord *cObj =
+        clothingByIndex( inPlayer->clothing, inC );
+
+    if( cObj == NULL ||
+        ! containmentPermitted( cObj->id, inPlayer->holdingID ) ) {
+        return false;
+        }
+
+    int oldNum = inPlayer->clothingContained[inC].size();
+
+    if( inI < 0 || inI >= oldNum ) {
+        return false;
+        }
+
+    int outID = inPlayer->clothingContained[inC].getElementDirect( inI );
+
+    // 换出的物品须可取(与 removeFromClothingContainerToHold 同门槛)
+    double playerAge = computeAge( inPlayer );
+    TransRecord *pickUpTrans = getPTrans( 0, outID );
+    bool hasPickUpTrans =
+        pickUpTrans != NULL && pickUpTrans->newTarget == 0;
+
+    if( getObject( outID )->minPickupAge > playerAge ||
+        ( getObject( outID )->permanent && ! hasPickUpTrans ) ) {
+        return false;
+        }
+
+    // 衰减 eta 互换:入槽按 stretch 压缩,入手按 stretch 放大
+    // (镜像 add/remove 两条路径的换算)
+    float stretch = cObj->slotTimeStretch;
+
+    timeSec_t curTime = Time::getCurrentTime();
+
+    timeSec_t inEta = inPlayer->holdingEtaDecay;
+    timeSec_t outEta =
+        inPlayer->clothingContainedEtaDecays[inC].getElementDirect( inI );
+
+    if( inEta != 0 ) {
+        timeSec_t offset = ( inEta - curTime ) / stretch;
+        inEta = curTime + offset;
+        }
+    if( outEta != 0 ) {
+        timeSec_t offset = ( outEta - curTime ) * stretch;
+        outEta = curTime + offset;
+        }
+
+    int inID = inPlayer->holdingID;
+
+    // 原位替换(deleteElement + push_middle 保持其他格下标不变)
+    inPlayer->clothingContained[inC].deleteElement( inI );
+    inPlayer->clothingContained[inC].push_middle( inID, inI );
+    inPlayer->clothingContainedEtaDecays[inC].deleteElement( inI );
+    inPlayer->clothingContainedEtaDecays[inC].push_middle( inEta, inI );
+
+    inPlayer->holdingID = outID;
+    inPlayer->holdingEtaDecay = outEta;
+    holdingSomethingNew( inPlayer );
+
+    return true;
+    }
+
+
+
+
 static void setHeldGraveOrigin( LiveObject *inPlayer, int inX, int inY,
                                 int inNewTarget ) {
     // make sure that there is nothing left there
@@ -10623,14 +11008,6 @@ char *isCurseNamingSay( char *inSaidString ) {
 
 char *isNamedGivingSay( char *inSaidString ) {
     return isReverseNamingSay( inSaidString, &namedGivingPhrases );
-    }
-
-char *isInfertilityDeclaringSay( char *inSaidString ) {
-    return isNamingSay( inSaidString, &infertilityDeclaringPhrases );
-    }
-
-char *isFertilityDeclaringSay( char *inSaidString ) {
-    return isNamingSay( inSaidString, &fertilityDeclaringPhrases );
     }
 
 
@@ -12954,11 +13331,8 @@ int main() {
     
     // password-protected objects
     readPhrases( "passwordProtectingPhrases", &passwordProtectingPhrases );
-    
-    readPhrases( "infertilityDeclaringPhrases", &infertilityDeclaringPhrases );
-    readPhrases( "fertilityDeclaringPhrases", &fertilityDeclaringPhrases );
 
-    eveName = 
+    eveName =
         SettingsManager::getStringSetting( "eveName", "EVE" );
     infertilitySuffix = 
         SettingsManager::getStringSetting( "infertilitySuffix", "+INFERTILE+" );
@@ -13722,6 +14096,9 @@ int main() {
                 newConnection.curseStatus.curseLevel = 0;
                 newConnection.curseStatus.excessPoints = 0;
 
+                // 默认普通 LOGIN;LVOLOGIN 解析时会覆盖为要观看的主播 id。
+                newConnection.liveViewTargetID = -1;
+
                 newConnection.twinCode = NULL;
                 newConnection.twinCount = 0;
                 
@@ -13736,7 +14113,15 @@ int main() {
                 int maxPlayers = 
                     SettingsManager::getIntSetting( "maxPlayers", 200 );
                 
-                int currentPlayers = players.size() + newConnections.size();
+                int currentPlayers = newConnections.size();
+                // 旁观者(liveViewMode)不计入名额:它们不占玩家空间,也不应
+                // 把服务器顶满导致正常玩家被拒。此数同时用于 SN 横幅(reflector
+                // 在线数)与 >=maxPlayers 拒绝判定。
+                for( int pi = 0; pi < players.size(); pi++ ) {
+                    if( ! players.getElement( pi )->liveViewMode ) {
+                        currentPlayers++;
+                        }
+                    }
                     
 
                 if( apocalypseTriggered || shutdownMode ) {
@@ -13787,6 +14172,7 @@ int main() {
                 newConnection.errorCauseString = "";
                 newConnection.rejectedSendTime = 0;
                 newConnection.playerListSent = false;
+                newConnection.liveStreamSent = false;
                 int messageLength = strlen( message );
                 
                 int numSent = 
@@ -14045,24 +14431,42 @@ int main() {
                             nextConnection->twinCode = NULL;
                             }
                                 
-                        int newID = processLoggedInPlayer( 
-                            true,
-                            nextConnection->sock,
-                            nextConnection->sockBuffer,
-                            nextConnection->email,
-                            nextConnection,
-                            nextConnection->tutorialNumber,
-                            nextConnection->curseStatus,
-                            nextConnection->lifeStats,
-                            nextConnection->fitnessScore );
-                            
-                        if( newID == -2 ) {
-                            nextConnection->error = true;
-                            nextConnection->errorCauseString =
-                                "Target family is not found or does not have fertiles";
-                            // Do not remove this connection
-                            // we need to notify them about the famTarget failure
-                            removeConnectionFromList = false;
+                        int newID;
+                        if( nextConnection->liveViewTargetID >= 0 ) {
+                            // LVOLOGIN 直播旁观:鉴权同普通登录,但不出生玩家本体,
+                            // 改造为从出生即 vogMode 的只读 LiveObject。
+                            newID = processLiveViewSpectator(
+                                nextConnection->sock,
+                                nextConnection->sockBuffer,
+                                nextConnection->email,
+                                nextConnection,
+                                nextConnection->liveViewTargetID );
+                            if( newID == -1 ) {
+                                nextConnection->error = true;
+                                nextConnection->errorCauseString =
+                                    "Invalid live stream target";
+                                }
+                            }
+                        else {
+                            newID = processLoggedInPlayer(
+                                true,
+                                nextConnection->sock,
+                                nextConnection->sockBuffer,
+                                nextConnection->email,
+                                nextConnection,
+                                nextConnection->tutorialNumber,
+                                nextConnection->curseStatus,
+                                nextConnection->lifeStats,
+                                nextConnection->fitnessScore );
+
+                            if( newID == -2 ) {
+                                nextConnection->error = true;
+                                nextConnection->errorCauseString =
+                                    "Target family is not found or does not have fertiles";
+                                // Do not remove this connection
+                                // we need to notify them about the famTarget failure
+                                removeConnectionFromList = false;
+                                }
                             }
                         }
                                                         
@@ -14269,6 +14673,155 @@ int main() {
                         nextConnection->error = true;
                         nextConnection->errorCauseString = "Bad secret for PLAYER_LIST message";
                     }
+                    // ---- LIVE_STREAM: 与 PLAYER_LIST 字段相同, 仅返回已开启直播(streaming)的玩家 ----
+                    else if( stringStartsWith( message, "LIVE_STREAM" ) ) {
+                        // 公开接口(返回 opt-in 直播玩家), 不鉴权, 仅靠 per-IP 限流
+                        if( !nextConnection->liveStreamSent ) {
+                            HostAddress *a = nextConnection->sock->getRemoteHostAddress();
+                            char address[100];
+                            char *ipStr = NULL;
+                            if( a == NULL ) {
+                                sprintf(address, "%s", "unknown");
+                                }
+                            else {
+                                snprintf(address, 99, "%s:%d",
+                                         a->mAddressString, a->mPort );
+                                ipStr = stringDuplicate( a->mAddressString );
+                                delete a;
+                                }
+                            AppLog::infoF(
+                                "Got LIVE_STREAM request from address: %s",
+                                address );
+
+                            // per-IP 限流 (复用 PLAYER_LIST 的限流记录与阈值)
+                            char rateLimited = false;
+                            if( ipStr != NULL &&
+                                playerListRateLimitPerMinute > 0 ) {
+                                double now = Time::getCurrentTime();
+                                for( int ri = playerListRateRecords.size() - 1;
+                                     ri >= 0; ri-- ) {
+                                    PlayerListRateRecord *oldR =
+                                        playerListRateRecords.getElement( ri );
+                                    if( now - oldR->windowStartTime > 60 ) {
+                                        delete [] oldR->ip;
+                                        playerListRateRecords.deleteElement( ri );
+                                        }
+                                    }
+                                PlayerListRateRecord *r = NULL;
+                                for( int ri = 0;
+                                     ri < playerListRateRecords.size(); ri++ ) {
+                                    PlayerListRateRecord *c =
+                                        playerListRateRecords.getElement( ri );
+                                    if( strcmp( c->ip, ipStr ) == 0 ) {
+                                        r = c;
+                                        break;
+                                        }
+                                    }
+                                if( r == NULL ) {
+                                    PlayerListRateRecord newR;
+                                    newR.ip = stringDuplicate( ipStr );
+                                    newR.requestCount = 1;
+                                    newR.windowStartTime = now;
+                                    playerListRateRecords.push_back( newR );
+                                    }
+                                else if( now - r->windowStartTime >= 60 ) {
+                                    r->requestCount = 1;
+                                    r->windowStartTime = now;
+                                    }
+                                else {
+                                    r->requestCount++;
+                                    if( r->requestCount >
+                                        playerListRateLimitPerMinute ) {
+                                        rateLimited = true;
+                                        }
+                                    }
+                                }
+                            if( ipStr != NULL ) {
+                                delete [] ipStr;
+                                }
+                            if( rateLimited ) {
+                                AppLog::infoF(
+                                    "LIVE_STREAM rate limit exceeded for: %s",
+                                    address );
+                                nextConnection->error = true;
+                                nextConnection->errorCauseString =
+                                    "LIVE_STREAM rate limit exceeded";
+                                }
+
+                            int numLive = 0;
+                            for( int i=0; i<players.size(); i++ ) {
+                                LiveObject *player = players.getElement( i );
+                                if( ! player->error && player->streaming ) {
+                                    numLive += 1;
+                                    }
+                                }
+                            int buffSize = 32 * 1024;
+                            char messageBuff[buffSize];
+                            messageBuff[0] = '\0';
+                            sprintf(messageBuff, "%d\n", numLive);
+                            int remainingLen =
+                                buffSize - 2 - strlen(messageBuff);
+                            float age;
+                            char gender, *name, *familyName;
+                            char finished = true;
+                            char *playerLine;
+                            for( int i = 0; i < players.size(); i++ ) {
+                                LiveObject *player = players.getElement( i );
+                                if( player->error ) {
+                                    continue;
+                                    }
+                                // 仅返回已开启直播的玩家
+                                if( ! player->streaming ) {
+                                    continue;
+                                    }
+                                gender = getFemale( player ) ? 'F' : 'M';
+                                age = (float) computeAge(
+                                    player->lifeStartTimeSeconds );
+                                if(player->name == NULL) {
+                                    name = (char*)"";
+                                    }
+                                else {
+                                    name = player->name;
+                                    }
+                                if(player->familyName == NULL) {
+                                    familyName = (char*)"";
+                                    }
+                                else {
+                                    familyName = player->familyName;
+                                    }
+                                const char *emailStr =
+                                    (player->email != NULL) ? player->email : "";
+                                playerLine = autoSprintf(
+                                    "%d,%d,%d,%c,%.1f,%d,%d,%s,%s,%s\n",
+                                    player->id, player->lineageEveID,
+                                    player->parentID, gender, age,
+                                    player->declaredInfertile,
+                                    player->isTutorial,
+                                    name, familyName, emailStr);
+                                int playerLineLen = strlen(playerLine);
+                                if(playerLineLen + 2 > remainingLen) {
+                                    delete[] playerLine;
+                                    finished = false;
+                                    break;
+                                    }
+                                strncat(messageBuff, playerLine, playerLineLen);
+                                remainingLen -= playerLineLen;
+                                delete[] playerLine;
+                                }
+                            if(finished) {
+                                strncat(messageBuff, "#", 2);
+                                }
+                            if( !rateLimited ) {
+                                nextConnection->sock->send(
+                                    (unsigned char*)messageBuff,
+                                    strlen( messageBuff ), false, false);
+                                AppLog::infoF(
+                                    "LIVE_STREAM response-message sent to: %s",
+                                    address );
+                                }
+                            nextConnection->liveStreamSent = true;
+                            }
+                        }
                     else if( strstr( message, "LOGIN" ) != NULL ) {
                         
                         SimpleVector<char *> *tokens =
@@ -14375,11 +14928,25 @@ int main() {
 
                             char *pwHash = tokens->getElementDirect( 2 );
                             char *keyHash = tokens->getElementDirect( 3 );
-                            
+
+                            // LVOLOGIN(直播旁观登录):第 4 token 是要观看的主播 id,
+                            // 而非 tutorialNumber。因 "LOGIN" 是 "LVOLOGIN" 的后缀,
+                            // strstr 命中同一分支,此处用前缀区分。
+                            char isLiveViewLogin =
+                                ( strncmp( message, "LVOLOGIN", 8 ) == 0 );
+
                             if( tokens->size() >= 5 ) {
-                                sscanf( tokens->getElementDirect( 4 ),
-                                        "%d", 
-                                        &( nextConnection->tutorialNumber ) );
+                                if( isLiveViewLogin ) {
+                                    sscanf( tokens->getElementDirect( 4 ),
+                                            "%d",
+                                            &( nextConnection->liveViewTargetID ) );
+                                    nextConnection->tutorialNumber = 0;
+                                    }
+                                else {
+                                    sscanf( tokens->getElementDirect( 4 ),
+                                            "%d",
+                                            &( nextConnection->tutorialNumber ) );
+                                    }
                                 }
                             
                             if( tokens->size() == 7 ) {
@@ -14539,24 +15106,42 @@ int main() {
                                             delete [] nextConnection->twinCode;
                                             nextConnection->twinCode = NULL;
                                             }
-                                        int newID = processLoggedInPlayer( 
-                                            true,
-                                            nextConnection->sock,
-                                            nextConnection->sockBuffer,
-                                            nextConnection->email,
-                                            nextConnection,
-                                            nextConnection->tutorialNumber,
-                                            nextConnection->curseStatus,
-                                            nextConnection->lifeStats,
-                                            nextConnection->fitnessScore );
-                                            
-                                        if( newID == -2 ) {
-                                            nextConnection->error = true;
-                                            nextConnection->errorCauseString =
-                                                "Target family is not found or does not have fertiles";
-                                            // Do not remove this connection
-                                            // we need to notify them about the famTarget failure
-                                            removeConnectionFromList = false;
+                                        int newID;
+                                        if( nextConnection->liveViewTargetID >= 0 ) {
+                                            // LVOLOGIN 直播旁观:鉴权同普通登录,但不出生玩家本体,
+                                            // 改造为从出生即 vogMode 的只读 LiveObject。
+                                            newID = processLiveViewSpectator(
+                                                nextConnection->sock,
+                                                nextConnection->sockBuffer,
+                                                nextConnection->email,
+                                                nextConnection,
+                                                nextConnection->liveViewTargetID );
+                                            if( newID == -1 ) {
+                                                nextConnection->error = true;
+                                                nextConnection->errorCauseString =
+                                                    "Invalid live stream target";
+                                                }
+                                            }
+                                        else {
+                                            newID = processLoggedInPlayer(
+                                                true,
+                                                nextConnection->sock,
+                                                nextConnection->sockBuffer,
+                                                nextConnection->email,
+                                                nextConnection,
+                                                nextConnection->tutorialNumber,
+                                                nextConnection->curseStatus,
+                                                nextConnection->lifeStats,
+                                                nextConnection->fitnessScore );
+
+                                            if( newID == -2 ) {
+                                                nextConnection->error = true;
+                                                nextConnection->errorCauseString =
+                                                    "Target family is not found or does not have fertiles";
+                                                // Do not remove this connection
+                                                // we need to notify them about the famTarget failure
+                                                removeConnectionFromList = false;
+                                                }
                                             }
                                         }
                                                                         
@@ -14589,7 +15174,8 @@ int main() {
                     
                     delete [] message;
                     }
-                else if(nextConnection->playerListSent) {
+                else if(nextConnection->playerListSent ||
+                        nextConnection->liveStreamSent) {
                     int timeToClose = playerListSecret != NULL ? 10 : 4; // give more time if it is private.
                     if(currentTime - nextConnection->connectionStartTimeSeconds > timeToClose) {
                         HostAddress *a = nextConnection->sock->getRemoteHostAddress();
@@ -14601,7 +15187,7 @@ int main() {
                             snprintf(address, 99, "%s:%d", a->mAddressString, a->mPort );
                             delete a;
                             }
-                        AppLog::infoF("Closing socket of %s for PLAYER_LIST request after %d seconds", address, timeToClose);
+                        AppLog::infoF("Closing socket of %s for PLAYER_LIST/LIVE_STREAM request after %d seconds", address, timeToClose);
                         deleteMembers( nextConnection );
                         newConnections.deleteElement(i);
                         i--;
@@ -15368,7 +15954,8 @@ int main() {
                         }
                     
 
-                    if( allow && nextPlayer->connected ) {
+                    if( allow && nextPlayer->connected &&
+                        ! nextPlayer->liveViewMode ) {
                         nextPlayer->vogMode = true;
                         nextPlayer->preVogPos = getPlayerPos( nextPlayer );
                         nextPlayer->preVogBirthPos = nextPlayer->birthPos;
@@ -15377,6 +15964,7 @@ int main() {
                     }
                 else if( m.type == VOGN ) {
                     if( nextPlayer->vogMode &&
+                        ! nextPlayer->liveViewMode &&
                         players.size() > 1 ) {
                         
                         nextPlayer->vogJumpIndex++;
@@ -15425,6 +16013,7 @@ int main() {
                     }
                 else if( m.type == VOGP ) {
                     if( nextPlayer->vogMode &&
+                        ! nextPlayer->liveViewMode &&
                         players.size() > 1 ) {
 
                         nextPlayer->vogJumpIndex--;
@@ -15480,7 +16069,7 @@ int main() {
                         }
                     }
                 else if( m.type == VOGM ) {
-                    if( nextPlayer->vogMode ) {
+                    if( nextPlayer->vogMode && ! nextPlayer->liveViewMode ) {
                         nextPlayer->xd = m.x;
                         nextPlayer->yd = m.y;
                         
@@ -15499,7 +16088,7 @@ int main() {
                         }
                     }
                 else if( m.type == VOGI ) {
-                    if( nextPlayer->vogMode ) {
+                    if( nextPlayer->vogMode && ! nextPlayer->liveViewMode ) {
                         if( m.id > 0 &&
                             getObject( m.id ) != NULL ) {
                             
@@ -15513,7 +16102,7 @@ int main() {
                         }
                     }
                 else if( m.type == VOGT && m.saidText != NULL ) {
-                    if( nextPlayer->vogMode ) {
+                    if( nextPlayer->vogMode && ! nextPlayer->liveViewMode ) {
                         
                         newLocationSpeech.push_back( 
                             stringDuplicate( m.saidText ) );
@@ -15529,7 +16118,7 @@ int main() {
                         }
                     }
                 else if( m.type == VOGX ) {
-                    if( nextPlayer->vogMode ) {
+                    if( nextPlayer->vogMode && ! nextPlayer->liveViewMode ) {
                         nextPlayer->vogMode = false;
                         
                         // If they send VOGX with coords other than (0, 0), teleport them
@@ -15562,8 +16151,150 @@ int main() {
                         nextPlayer->firstMapSent = false;
                         }
                     }
+                // ---- LIVE 直播观察协议(LVO*,只读旁观,公开观看)----
+                // 直播是公开的:任何已登录玩家都可 LVOS 进入观察模式,观看
+                // 已开直播(streaming=true)的主播,无白名单。主播侧用 streaming
+                // 标记 opt-in 公开(LVOF 校验目标须 streaming)。
+                // liveViewMode 阻断全部 VOG* 写命令 —— 这不是管理员隔离,而是
+                // 安全护栏:VOGI 等写命令执行时只查 vogMode、不复查 vogAllowAccounts
+                // 白名单,若不阻断,任何人都能借 LVOS 拿 vogMode 后调 VOGI 放物,
+                // 绕过 VOG 白名单。公开后此守卫更必需。
+                else if( m.type == LVOS ) {
+                    AppLog::infoF( "LVO: LVOS p=%d connected=%d vogMode=%d "
+                                   "liveViewMode=%d", nextPlayer->id,
+                                   (int)nextPlayer->connected,
+                                   (int)nextPlayer->vogMode,
+                                   (int)nextPlayer->liveViewMode );
+                    if( nextPlayer->connected &&
+                        ! nextPlayer->vogMode ) {
+                        nextPlayer->vogMode = true;
+                        nextPlayer->liveViewMode = true;
+                        nextPlayer->liveViewTargetID = -1;
+                        nextPlayer->preVogPos = getPlayerPos( nextPlayer );
+                        nextPlayer->preVogBirthPos = nextPlayer->birthPos;
+                        nextPlayer->foodStore =
+                            computeFoodCapacity( nextPlayer );
+                        AppLog::infoF( "LVO: LVOS OK p=%d, entered liveView",
+                                       nextPlayer->id );
+
+                        // 观众进入观察模式后对所有人不可见(复用 vogMode 不可见语义)。
+                        // 观众出生时(非 vogMode)可能已被附近玩家收到进视野,之后进
+                        // vogMode 虽被 PU 过滤,但他人客户端仍保留该对象直至收到 PO;
+                        // 且观众身体会被 LVOF 搬到主播处。故此处主动向所有其他在线玩家
+                        // 发 PO(Player Out),让其客户端把观众标记为超距隐藏。
+                        // (对从未见过该观众的客户端是 no-op,安全。)
+                        char *poMessage = autoSprintf( "PO\n%d\n#",
+                                                       nextPlayer->id );
+                        int numP = players.size();
+                        for( int pi = 0; pi < numP; pi++ ) {
+                            LiveObject *other = players.getElement( pi );
+                            if( other != nextPlayer &&
+                                other->connected && ! other->error ) {
+                                sendMessageToPlayer( other, poMessage,
+                                                     strlen( poMessage ) );
+                                }
+                            }
+                        delete [] poMessage;
+                        }
+                    }
+                // LVOF p_id:跳转/跟随指定主播(p_id 在解析时存入 m.id,
+                // 避开通用 m.x 的 birthPos 坐标转换污染)。目标必须是已开直播
+                // (streaming=true)的玩家 —— 直播公开观看的边界:只看 opt-in
+                // 公开的主播,不能跳到未开直播的玩家。一次性跳转,持续跟随需
+                // 客户端周期性重发 LVOF。
+                else if( m.type == LVOF ) {
+                    AppLog::infoF( "LVO: LVOF p=%d target=%d liveViewMode=%d",
+                                   nextPlayer->id, m.id,
+                                   (int)nextPlayer->liveViewMode );
+                    if( nextPlayer->liveViewMode ) {
+                        LiveObject *targetPlayer = getLiveObject( m.id );
+                        if( targetPlayer != NULL ) {
+                            AppLog::infoF( "LVO: LVOF target=%d found=Y "
+                                           "error=%d vogMode=%d streaming=%d",
+                                           m.id, (int)targetPlayer->error,
+                                           (int)targetPlayer->vogMode,
+                                           (int)targetPlayer->streaming );
+                            }
+                        else {
+                            AppLog::infoF( "LVO: LVOF target=%d found=N "
+                                           "(not in players list)", m.id );
+                            }
+                        if( targetPlayer != NULL &&
+                            ! targetPlayer->error &&
+                            ! targetPlayer->vogMode &&
+                            targetPlayer->streaming ) {
+                            AppLog::infoF( "LVO: LVOF OK p=%d -> target=%d, "
+                                           "jumping + sending VU",
+                                           nextPlayer->id, m.id );
+
+                            // 记下跟随目标,供地图发送块据此把观众地图对齐主播
+                            nextPlayer->liveViewTargetID = m.id;
+
+                            GridPos o = getPlayerPos( targetPlayer );
+                            GridPos oldPos = getPlayerPos( nextPlayer );
+
+                            nextPlayer->xd = o.x;
+                            nextPlayer->yd = o.y;
+                            nextPlayer->xs = o.x;
+                            nextPlayer->ys = o.y;
+
+                            if( distance( oldPos, o ) > 10000 ) {
+                                nextPlayer->birthPos = o;
+                                }
+
+                            char *message = autoSprintf( "VU\n%d %d\n#",
+                                                         nextPlayer->xs -
+                                                         nextPlayer->birthPos.x,
+                                                         nextPlayer->ys -
+                                                         nextPlayer->birthPos.y );
+                            sendMessageToPlayer( nextPlayer, message,
+                                                 strlen( message ) );
+                            delete [] message;
+
+                            nextPlayer->firstMessageSent = false;
+                            nextPlayer->firstMapSent = false;
+                            }
+                        }
+                    }
+                // LVOX:退出直播观察,恢复进入前位置与 birthPos。
+                else if( m.type == LVOX ) {
+                    // 经 LVOLOGIN 进入的纯旁观者永不可变回普通玩家:
+                    // 忽略 LVOX(不清标志、不回滚 preVogPos),否则会变成无族谱、
+                    // 可移动可被见的裸玩家。旁观退出靠客户端关 socket。
+                    if( nextPlayer->spectator ) {
+                        AppLog::infoF(
+                            "LVO: spectator %d sent LVOX, ignored "
+                            "(pure spectator cannot exit to world body)",
+                            nextPlayer->id );
+                        }
+                    else if( nextPlayer->liveViewMode ) {
+                        nextPlayer->vogMode = false;
+                        nextPlayer->liveViewMode = false;
+                        nextPlayer->liveViewTargetID = -1;
+
+                        GridPos p = nextPlayer->preVogPos;
+                        nextPlayer->xd = p.x;
+                        nextPlayer->yd = p.y;
+                        nextPlayer->xs = p.x;
+                        nextPlayer->ys = p.y;
+                        nextPlayer->birthPos = nextPlayer->preVogBirthPos;
+
+                        char *message = autoSprintf( "VU\n%d %d\n#",
+                                                     nextPlayer->xs -
+                                                     nextPlayer->birthPos.x,
+                                                     nextPlayer->ys -
+                                                     nextPlayer->birthPos.y );
+                        sendMessageToPlayer( nextPlayer, message,
+                                             strlen( message ) );
+                        delete [] message;
+
+                        nextPlayer->postVogMode = true;
+                        nextPlayer->firstMessageSent = false;
+                        nextPlayer->firstMapSent = false;
+                        }
+                    }
                 else if( nextPlayer->vogMode ) {
-                    // ignore non-VOG messages from them
+                    // ignore non-VOG/non-LVO messages from observer-mode players
                     }
                 else if( m.type == FORCE ) {
                     if( m.x == nextPlayer->xd &&
@@ -15586,9 +16317,58 @@ int main() {
                     // immediately send pong
                     char *message = autoSprintf( "PONG\n%d#", m.id );
 
-                    sendMessageToPlayer( nextPlayer, message, 
+                    sendMessageToPlayer( nextPlayer, message,
                                          strlen( message ) );
                     delete [] message;
+                    }
+                else if( m.type == STREAM ) {
+                    // 直播 opt-in:置 streaming=true(只开不关,静默,非持久)。
+                    // 独立协议,不经 SAY 的 1 秒限流/年龄截断。
+                    if( ! nextPlayer->streaming ) {
+                        nextPlayer->streaming = true;
+                        }
+                    }
+                else if( m.type == INFERTILE || m.type == FERTILE ) {
+                    // 生育声明(仅女性,与旧 SAY 关键词版语义一致)。
+                    if( getFemale( nextPlayer ) ) {
+                        if( m.type == INFERTILE &&
+                            ! nextPlayer->declaredInfertile ) {
+                            nextPlayer->declaredInfertile = true;
+
+                            if( nextPlayer->displayedName != NULL ) {
+                                delete [] nextPlayer->displayedName;
+                                }
+                            if( nextPlayer->name == NULL ) {
+                                nextPlayer->displayedName =
+                                    stringDuplicate( infertilitySuffix );
+                                }
+                            else {
+                                nextPlayer->displayedName = autoSprintf(
+                                    "%s %s", nextPlayer->name,
+                                    infertilitySuffix );
+                                }
+
+                            playerIndicesToSendNamesAbout.push_back( i );
+                            }
+                        else if( m.type == FERTILE &&
+                                 nextPlayer->declaredInfertile ) {
+                            nextPlayer->declaredInfertile = false;
+
+                            if( nextPlayer->displayedName != NULL ) {
+                                delete [] nextPlayer->displayedName;
+                                }
+                            if( nextPlayer->name == NULL ) {
+                                nextPlayer->displayedName =
+                                    stringDuplicate( fertilitySuffix );
+                                }
+                            else {
+                                nextPlayer->displayedName =
+                                    stringDuplicate( nextPlayer->name );
+                                }
+
+                            playerIndicesToSendNamesAbout.push_back( i );
+                            }
+                        }
                     }
                 else if( m.type == DIE ) {
                     if( computeAge( nextPlayer ) < 2 ) {
@@ -16631,11 +17411,10 @@ int main() {
                             Time::getCurrentTime();
 
                         unsigned int sayLimit = getSayLimit( nextPlayer );
-                        
-                        if( strlen( m.saidText ) > sayLimit ) {
-                            // truncate
-                            m.saidText[ sayLimit ] = '\0';
-                            }
+
+                        // sayLimit 是 UTF-8 字符数(非字节数)。按字符边界
+                        // 截断,避免切断中文等多字节字符产生残缺 UTF-8。
+                        truncateToUTF8CharCount( m.saidText, sayLimit );
 
                         int len = strlen( m.saidText );
                         
@@ -16652,29 +17431,56 @@ int main() {
                         // now clean up gratuitous runs of spaces left behind
                         // by removed characters (or submitted by a wayward
                         // client)
-                        SimpleVector<char *> *tokens = 
-                            tokenizeString( m.saidText );
+                        // 保留手动换行:按 '\n' 分段,段内清理多余空格,
+                        // 段间以 '\n' 重连(多行气泡;PS 广播按行拆发,
+                        // 客户端把解析不出 id 的行拼回上一说话者)
+                        int numSaySegs;
+                        char **saySegs =
+                            split( m.saidText, "\n", &numSaySegs );
+
+                        SimpleVector<char *> *sayLines =
+                            new SimpleVector<char *>();
+
+                        for( int s = 0; s < numSaySegs; s++ ) {
+                            SimpleVector<char *> *tokens =
+                                tokenizeString( saySegs[s] );
+
+                            if( tokens->size() > 0 ) {
+                                char **tokensArray =
+                                    tokens->getElementArray();
+
+                                sayLines->push_back(
+                                    join( tokensArray,
+                                          tokens->size(),
+                                          " " ) );
+
+                                tokens->deallocateStringElements();
+                                delete [] tokensArray;
+                                }
+
+                            delete tokens;
+                            delete [] saySegs[s];
+                            }
+                        delete [] saySegs;
 
                         char *cleanedString;
-                        if( tokens->size() > 0 ) {
-                        
-                            char **tokensArray = 
-                                tokens->getElementArray();
-                        
-                            // join words with single spaces
-                            cleanedString = join( tokensArray,
-                                                  tokens->size(),
-                                                  " " );
-                        
-                            tokens->deallocateStringElements();
-                            delete [] tokensArray;
+                        if( sayLines->size() > 0 ) {
+                            char **linesArray =
+                                sayLines->getElementArray();
+
+                            cleanedString = join( linesArray,
+                                                  sayLines->size(),
+                                                  "\n" );
+
+                            delete [] linesArray;
                             }
                         else {
                             cleanedString = stringDuplicate( "" );
                             }
 
-                        delete tokens;
-                        
+                        sayLines->deallocateStringElements();
+                        delete sayLines;
+
                         delete [] m.saidText;
                         m.saidText = cleanedString;
                         
@@ -16798,37 +17604,6 @@ int main() {
                                 playerIndicesToSendNamesAbout.push_back( i );
                                 }
                             }
-                        
-                        if( getFemale( nextPlayer ) ) {
-                            char *infertilityDeclaring = isInfertilityDeclaringSay( m.saidText );
-                            char *fertilityDeclaring = isFertilityDeclaringSay( m.saidText );
-                            if( infertilityDeclaring != NULL && !nextPlayer->declaredInfertile ) {
-                                nextPlayer->declaredInfertile = true;
-                                
-                                if ( nextPlayer->displayedName != NULL ) delete [] nextPlayer->displayedName;
-                                if (nextPlayer->name == NULL) {
-                                    nextPlayer->displayedName = stringDuplicate( infertilitySuffix );
-                                } else {
-                                    nextPlayer->displayedName = autoSprintf( "%s %s", nextPlayer->name, infertilitySuffix);
-                                }
-                                
-                                playerIndicesToSendNamesAbout.push_back( i );
-                                
-                            } else if( fertilityDeclaring != NULL && nextPlayer->declaredInfertile ) {
-                                nextPlayer->declaredInfertile = false;
-                                
-                                if ( nextPlayer->displayedName != NULL ) delete [] nextPlayer->displayedName;
-                                if (nextPlayer->name == NULL) {
-                                    nextPlayer->displayedName = stringDuplicate( fertilitySuffix );
-                                } else {
-                                    nextPlayer->displayedName = stringDuplicate( nextPlayer->name );
-                                }
-                                
-                                playerIndicesToSendNamesAbout.push_back( i );
-                            }
-                        }
-                        
-
                         
                         LiveObject *otherToForgive = NULL;
                         
@@ -19986,7 +20761,19 @@ int main() {
                                     
                                     // drop into clothing indicates right-click
                                     // so swap
-                                    
+
+                                    // 带槽位号(DROP x y c i)时先尝试与该栈
+                                    // 下标精确交换;失败(越界/不可取/尺寸
+                                    // 不符)回退旧的加顶+弹底逻辑
+                                    char slotSwapDone = false;
+                                    if( m.i >= 0 ) {
+                                        slotSwapDone =
+                                            swapHeldIntoClothingContainerSlot(
+                                                nextPlayer, m.c, m.i );
+                                        }
+
+                                    if( ! slotSwapDone ) {
+
                                     // first add to top of container
                                     // if possible
                                     addHeldToClothingContainer( nextPlayer,
@@ -20046,18 +20833,19 @@ int main() {
                                                 nextPlayer->clothing, m.c );
                                         if( nextPlayer->clothingContained[m.c].
                                             size() > cObj->numSlots ) {
-                                            
+
                                             // over-full, remove failed
-                                            
+
                                             // pop top item back off into hand
                                             removeFromClothingContainerToHold(
-                                                nextPlayer, m.c, 
+                                                nextPlayer, m.c,
                                                 nextPlayer->
                                                 clothingContained[m.c].
                                                 size() - 1, true );
                                             }
                                         }
-                                    
+                                        }
+
                                     }
                                 else if( nextPlayer->holdingID > 0 ) {
                                     // non-baby drop
@@ -23538,14 +24326,28 @@ int main() {
                 int chunkDimensionX = nextPlayer->mMapD / 2;
                 int chunkDimensionY = chunkDimensionX - 2;
                 if( nextPlayer->heldByOther ) {
-                    LiveObject *holdingPlayer = 
+                    LiveObject *holdingPlayer =
                         getLiveObject( nextPlayer->heldByOtherID );
-                
+
                     if( holdingPlayer != NULL ) {
                         playerXD = holdingPlayer->xd;
                         playerYD = holdingPlayer->yd;
                     }
                 }
+                // 直播观察:观众地图发送位置跟随主播,使增量 MC 围绕主播实时加载
+                // (LVOF 后观众 xd/yd 冻结,主播移动不再触发新 MC;此处把主播当前
+                //  位置作为地图中心,主播走到哪加载到哪,与主播本人视野一致)
+                char liveViewFollowing = false;
+                if( nextPlayer->liveViewMode &&
+                    nextPlayer->liveViewTargetID >= 0 ) {
+                    LiveObject *lvTarget =
+                        getLiveObject( nextPlayer->liveViewTargetID );
+                    if( lvTarget != NULL && ! lvTarget->error ) {
+                        playerXD = lvTarget->xd;
+                        playerYD = lvTarget->yd;
+                        liveViewFollowing = true;
+                        }
+                    }
                 //printf("playerXD: %d, lastSentMapX: %d\n", playerXD, nextPlayer->lastSentMapX);
 
                 //printf("playerYD: %d, lastSentMapY: %d\n", playerYD, nextPlayer->lastSentMapY);
@@ -23560,8 +24362,9 @@ int main() {
                     // or player flagged as needing first map again
                     
                     sendMapChunkMessage( nextPlayer,
-                                         // override if held
-                                         nextPlayer->heldByOther,
+                                         // override if held or liveView-following
+                                         nextPlayer->heldByOther ||
+                                             liveViewFollowing,
                                          playerXD,
                                          playerYD );
 
@@ -23576,8 +24379,13 @@ int main() {
                     // add chunk updates for held babies first
                     for( int j=0; j<numLive; j++ ) {
                         LiveObject *otherPlayer = players.getElement( j );
-                        
+
                         if( otherPlayer->error ) {
+                            continue;
+                            }
+
+                        // 旁观者(vogMode)不作为 held-baby 源泄漏给他人。
+                        if( otherPlayer->vogMode ) {
                             continue;
                             }
 
@@ -24369,10 +25177,46 @@ int main() {
                                 int curseFlag =
                                     newSpeechCurseFlags.getElementDirect( u );
 
-                                char *line = autoSprintf( "%d/%d %s\n", 
+                                // 多行语音:续行加 ':' 前缀标记。否则数字
+                                // 开头的续行会被客户端 sscanf("%d") 误解析
+                                // 为新说话者头('%d 文本' 格式)而丢弃。
+                                // ':' 非空白非数字非符号,%d 必然解析失败。
+                                int numPhraseLines;
+                                char **phraseLines = split( translatedPhrase,
+                                                            "\n",
+                                                            &numPhraseLines );
+                                char *markedPhrase;
+                                if( numPhraseLines > 1 ) {
+                                    SimpleVector<char> markedWorking;
+                                    markedWorking.appendElementString(
+                                        phraseLines[0] );
+                                    for( int pl = 1;
+                                         pl < numPhraseLines;
+                                         pl++ ) {
+                                        markedWorking.appendElementString(
+                                            "\n:" );
+                                        markedWorking.appendElementString(
+                                            phraseLines[pl] );
+                                        }
+                                    markedPhrase =
+                                        markedWorking.getElementString();
+                                    }
+                                else {
+                                    markedPhrase =
+                                        stringDuplicate( translatedPhrase );
+                                    }
+                                for( int pl = 0;
+                                     pl < numPhraseLines;
+                                     pl++ ) {
+                                    delete [] phraseLines[pl];
+                                    }
+                                delete [] phraseLines;
+
+                                char *line = autoSprintf( "%d/%d %s\n",
                                                           speakerID,
                                                           curseFlag,
-                                                          translatedPhrase );
+                                                          markedPhrase );
+                                delete [] markedPhrase;
                                 delete [] translatedPhrase;
                                 delete [] trimmedPhrase;
                                 
@@ -24889,11 +25733,14 @@ int main() {
                 AppLog::infoF( "%d remaining player(s) alive on server ",
                                players.size() - 1 );
                 
-                addPastPlayer( nextPlayer );
+                // 旁观者无族谱/统计价值,不入 past-life 记录,避免 0 寿命旁观污染族谱。
+                if( ! nextPlayer->spectator ) {
+                    addPastPlayer( nextPlayer );
+                    }
 
                 if( nextPlayer->sock != NULL ) {
                     sockPoll.removeSocket( nextPlayer->sock );
-                
+
                     delete nextPlayer->sock;
                     nextPlayer->sock = NULL;
                     }

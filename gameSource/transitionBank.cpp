@@ -1961,6 +1961,7 @@ void regenerateBecomeFoodMap() {
         int foodID = allFoods->getElementDirect( j );
 
         SimpleVector<TransRecord*> *prodTrans = getAllProduces( foodID );
+        if( prodTrans == NULL ) continue;
         for( int i=0; i<prodTrans->size(); i++ ) {
             TransRecord *t = prodTrans->getElementDirect(i);
 
@@ -1980,6 +1981,7 @@ void regenerateBecomeFoodMap() {
         int foodID = allFoods->getElementDirect( j );
 
         SimpleVector<TransRecord*> *prodTrans = getAllProduces( foodID );
+        if( prodTrans == NULL ) continue;
         int foodDepth = getObjectDepth( foodID );
 
         for( int i=0; i<prodTrans->size(); i++ ) {
@@ -2076,6 +2078,14 @@ void regenerateBecomeFoodMap() {
         nextID = getObjectParent( nextID );
 
         SimpleVector<TransRecord*> *prodTrans = getAllProduces( nextID );
+        if( prodTrans == NULL ) {
+            // nextID 超出 transitionBank.mapSize 范围，getAllProduces 对越界 ID 返回 NULL。
+            // 本处位于 while( index < horizon.size() ) 循环中，循环用 index 手动推进，
+            // 故需 index++ 再 continue，否则下方 prodTrans->size() 会解引用空指针导致
+            // 编辑器加载崩溃。与上方 bareHandSources / commonAncestors 两处一致地跳过。
+            index++;
+            continue;
+            }
         
         for( int i=0; i<prodTrans->size(); i++ ) {
             TransRecord *t = prodTrans->getElementDirect(i);

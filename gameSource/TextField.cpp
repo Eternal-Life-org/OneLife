@@ -21,6 +21,20 @@ extern double frameRateFactor;
 int TextField::sDeleteFirstDelaySteps = 30 / frameRateFactor;
 int TextField::sDeleteNextDelaySteps = 2 / frameRateFactor;
 
+// shortcuts off by default (game fields don't use them)
+// the editor turns this on for all of its fields
+char TextField::sPasteShortcutForNewFields = false;
+
+
+// snaps a byte index to the start of the UTF-8 character containing it
+// (UTF-8 continuation bytes match 10xxxxxx)
+static int utf8CharStart( const char *inText, int inPos ) {
+    while( inPos > 0 && ( (unsigned char)inText[ inPos ] & 0xC0 ) == 0x80 ) {
+        inPos--;
+        }
+    return inPos;
+    }
+
 
 
 
@@ -56,9 +70,11 @@ TextField::TextField( Font *inDisplayFont,
           mLabelOnTop( false ),
           mSelectionStart( -1 ),
           mSelectionEnd( -1 ),
-          mShiftPlusArrowsCanSelect( false ),
+          mShiftPlusArrowsCanSelect( sPasteShortcutForNewFields ),
           mCursorFlashSteps( 0 ),
-          mUsePasteShortcut( false ),
+          mUsePasteShortcut( sPasteShortcutForNewFields ),
+          mDragSelecting( false ),
+          mDragSelectAnchor( 0 ),
           mDrawLabelWithShadow( inDrawLabelWithShadow ) {
     
     if( inLabelText != NULL ) {
@@ -173,7 +189,6 @@ void TextField::setContentsHidden( char inHidden ) {
 void TextField::setText( const char *inText ) {
     delete [] mText;
     mText = NULL;
-    mCharDict.deleteAll();
 
     mSelectionStart = -1;
     mSelectionEnd = -1;
@@ -185,8 +200,14 @@ void TextField::setText( const char *inText ) {
     } else {
         insertString(inText);
     }
+    // insertString 可能因 maxLength 限制或非法 UTF-8 序列提前 break，
+    // 此时 mText 仍为 NULL，下方 strlen(NULL) 会崩溃。补 NULL 守卫。
+    if( mText == NULL ) {
+        mText = new char[1];
+        mText[0] = 0;
+    }
     mTextLen = strlen( mText );
-    
+
     mCursorPosition = mTextLen;
     // hold-downs broken
     mHoldDeleteSteps = -1;
@@ -510,7 +531,36 @@ void TextField::draw() {
         mFont->drawString( mDrawnText, textPos2, alignLeft );
         mDrawnTextX = textPos2.x;
     }
-    
+
+
+    if( isAnythingSelected() ) {
+        fixSelectionStartEnd();
+
+        char *beforeSelection = stringDuplicate( mText );
+        beforeSelection[ mSelectionStart ] = '\0';
+
+        char *selectionText = stringDuplicate( mText );
+        selectionText[ mSelectionEnd ] = '\0';
+
+        double selectionStartX =
+            mDrawnTextX + mFont->measureString( beforeSelection );
+        double selectionEndX =
+            selectionStartX +
+            mFont->measureString( &( selectionText[ mSelectionStart ] ) );
+
+        delete [] beforeSelection;
+        delete [] selectionText;
+
+        // highlight bar behind the selected part of the text
+        setDrawColor( 0.30, 0.55, 0.85, 1 );
+        drawRect( selectionStartX, rectStartY,
+                  selectionEndX, rectEndY );
+
+        // redraw the text on top of the highlight
+        setDrawColor( 1, 1, 1, 1 );
+        mFont->drawString( mDrawnText, textPos, alignLeft );
+        }
+
 
     double shadeWidth = 4 * mCharWidth;
     
@@ -613,14 +663,123 @@ void TextField::pointerMove( float inX, float inY ) {
     }
 
 
+void TextField::placeCursorAtX( float inX ) {
+    if( mDrawnText == NULL ) {
+        return;
+        }
+
+    int bestCursorDrawPosition = mCursorDrawPosition;
+    double bestDistance = mWide * 2;
+
+    int drawnTextLength = strlen( mDrawnText );
+
+    // find gap between drawn letters that is closest to clicked x
+
+    for( int i=0; i<=drawnTextLength; i++ ) {
+
+        char *textCopy = stringDuplicate( mDrawnText );
+
+        textCopy[i] = '\0';
+
+        double thisGapX =
+            mDrawnTextX +
+            mFont->measureString( textCopy ) +
+            mFont->getCharSpacing() / 2;
+
+        delete [] textCopy;
+
+        double thisDistance = fabs( thisGapX - inX );
+
+        if( thisDistance < bestDistance ) {
+            bestCursorDrawPosition = i;
+            bestDistance = thisDistance;
+            }
+        }
+
+    // snap to a UTF-8 character boundary
+    // (don't stop in the middle of a multi-byte character)
+    while( bestCursorDrawPosition > 0 &&
+           bestCursorDrawPosition < drawnTextLength &&
+           ( (unsigned char)mDrawnText[ bestCursorDrawPosition ] & 0xC0 ) == 0x80 ) {
+        bestCursorDrawPosition --;
+        }
+
+    int cursorDelta = bestCursorDrawPosition - mCursorDrawPosition;
+
+    mCursorPosition += cursorDelta;
+    }
+
+
+void TextField::pointerDown( float inX, float inY ) {
+    if( mIgnoreMouse || mIgnoreEvents ) {
+        return;
+        }
+
+    if( inX > - mWide / 2 &&
+        inX < + mWide / 2 &&
+        inY > - mHigh / 2 &&
+        inY < + mHigh / 2 ) {
+
+        char wasHidden = mContentsHidden;
+
+        focus();
+
+        if( wasHidden ) {
+            // don't adjust cursor from where it was
+            }
+        else {
+            // a click clears the selection and starts a new one
+            // that mouse dragging can extend
+            mSelectionStart = -1;
+            mSelectionEnd = -1;
+
+            placeCursorAtX( inX );
+
+            mDragSelectAnchor = mCursorPosition;
+            mDragSelecting = true;
+            }
+        }
+    }
+
+
+void TextField::pointerDrag( float inX, float inY ) {
+    if( !mDragSelecting ) {
+        return;
+        }
+
+    placeCursorAtX( inX );
+
+    if( mCursorPosition != mDragSelectAnchor ) {
+        mSelectionStart = mDragSelectAnchor;
+        mSelectionEnd = mCursorPosition;
+        fixSelectionStartEnd();
+        }
+    else {
+        mSelectionStart = -1;
+        mSelectionEnd = -1;
+        }
+    }
+
+
 void TextField::pointerUp( float inX, float inY ) {
     if( mIgnoreMouse || mIgnoreEvents ) {
         return;
         }
-        
+
     int mouseButton = getLastMouseButton();
     if ( mouseButton == MouseButton::WHEELUP || mouseButton == MouseButton::WHEELDOWN ) { return; }
-    
+
+    if( mDragSelecting ) {
+        // finish a drag selection
+        mDragSelecting = false;
+
+        if( ! isAnythingSelected() ) {
+            mSelectionStart = -1;
+            mSelectionEnd = -1;
+            }
+        return;
+        }
+
     if( inX > - mWide / 2 &&
         inX < + mWide / 2 &&
         inY > - mHigh / 2 &&
@@ -662,9 +821,17 @@ void TextField::pointerUp( float inX, float inY ) {
                     bestDistance = thisDistance;
                     }
                 }
-            
+
+            // snap to a UTF-8 character boundary
+            // (don't stop in the middle of a multi-byte character)
+            while( bestCursorDrawPosition > 0 &&
+                   bestCursorDrawPosition < drawnTextLength &&
+                   ( (unsigned char)mDrawnText[ bestCursorDrawPosition ] & 0xC0 ) == 0x80 ) {
+                bestCursorDrawPosition --;
+                }
+
             int cursorDelta = bestCursorDrawPosition - mCursorDrawPosition;
-            
+
             mCursorPosition += cursorDelta;
             }
         }
@@ -785,11 +952,25 @@ void TextField::insertString(const char *inString ) {
         } else {
             charWidth = -1;
         }
-        if (charWidth < 0 || (mMaxLength > 0 && (mTextLen + charWidth >= mMaxLength)))
+        if (charWidth < 0 || (mMaxLength > 0 && (mTextLen + charWidth > mMaxLength)))
             break;
+        // refuse invalid UTF-8 sequences (e.g. ANSI clipboard text)
+        // instead of inserting them as garbage
+        bool sequenceValid = true;
+        for (int i = 1; i < charWidth; i++) {
+            if ((p[i] & 0xC0) != 0x80) {
+                sequenceValid = false;
+                break;
+            }
+        }
+        if (!sequenceValid) {
+            // skip just this byte and keep scanning
+            p++;
+            continue;
+        }
         bool insertSuccess = true;
         for (int i=0; i<charWidth; i++){
-            unsigned char processedChar = processCharacter( *(p+i));    
+            unsigned char processedChar = processCharacter( *(p+i));
             if( processedChar != 0 ) {
                 insertCharacter( processedChar );
             } else {
@@ -803,9 +984,6 @@ void TextField::insertString(const char *inString ) {
                 insertSuccess = false;
                 break;
             }
-        }
-        if (insertSuccess) {
-            insertCharIndex(mCursorPosition - charWidth);
         }
         p += charWidth;
     }
@@ -879,52 +1057,80 @@ void TextField::setFireOnLoseFocus( char inFireOnLeave ) {
     mFireOnLeave = inFireOnLeave;
     }
 
-int TextField::getElementBeforeNumber(int val) {
-    int inNumBefore;
-    for (inNumBefore=0; inNumBefore < mCharDict.size(); inNumBefore ++){
-        int v = mCharDict.getElementDirectFast(inNumBefore);
-        if (v >= val) 
-            break;
-    }
-    return inNumBefore;
-}
-void TextField::insertCharIndex(int val) {
-    int inNumBefore = getElementBeforeNumber(val);
-    if (inNumBefore == mCharDict.size()) {
-        mCharDict.push_back(val);
-    } else if (mCharDict.getElementDirect(inNumBefore) > val) {
-            mCharDict.push_middle(val, inNumBefore-1);
-    }
-}
-
 void TextField::keyDown( unsigned char inASCII ) {
     if( !mFocused ) {
         return;
         }
     mCursorFlashSteps = 0;
-    
+
     if( isCommandKeyDown() ) {
         // not a normal key stroke (command key)
         // ignore it as input
 
-        if( mUsePasteShortcut && ( inASCII == 'v' || inASCII == 22 ) ) {
-            // ctrl-v is SYN on some platforms
-            
-            // paste!
-            if( isClipboardSupported() ) {
-                const char *clipboardText = (const char*)getClipboardText();
+        if( mUsePasteShortcut && isClipboardSupported() ) {
+
+            if( inASCII == 'v' || inASCII == 22 ) {
+                // ctrl-v is SYN on some platforms
+
+                // paste!
+                char *clipboardText = getClipboardText();
                 insertString(clipboardText);
                 delete [] clipboardText;
-                
+
                 mHoldDeleteSteps = -1;
                 mFirstDeleteRepeatDone = false;
-                
+
                 clearArrowRepeat();
-                
+
                 if( mFireOnAnyChange ) {
                     fireActionPerformed( this );
                 }
-                
+                return;
+                }
+            else if( inASCII == 'c' || inASCII == 3 ) {
+                // ctrl-c is ETX on some platforms
+
+                // copy!
+                // selected text, or the whole field if nothing is selected
+                fixSelectionStartEnd();
+                char *selectedText = getSelectedText();
+                if( selectedText != NULL ) {
+                    setClipboardText( selectedText );
+                    delete [] selectedText;
+                    }
+                else {
+                    setClipboardText( mText );
+                    }
+                return;
+                }
+            else if( inASCII == 'x' || inASCII == 24 ) {
+                // ctrl-x is CAN on some platforms
+
+                // cut!
+                // only when something is selected
+                if( isAnythingSelected() ) {
+                    fixSelectionStartEnd();
+                    char *selectedText = getSelectedText();
+                    setClipboardText( selectedText );
+                    delete [] selectedText;
+
+                    deleteHit();
+
+                    mHoldDeleteSteps = -1;
+                    mFirstDeleteRepeatDone = false;
+                    }
+                return;
+                }
+            else if( inASCII == 'a' || inASCII == 1 ) {
+                // ctrl-a is SOH on some platforms
+
+                // select all!
+                mSelectionStart = 0;
+                mSelectionEnd = mTextLen;
+                mSelectionAdjusting = &mSelectionEnd;
+                mCursorPosition = mTextLen;
+                return;
+                }
             }
 
         // but ONLY if it's an alphabetical key (A-Z,a-z)
@@ -933,25 +1139,17 @@ void TextField::keyDown( unsigned char inASCII ) {
         if( ( inASCII >= 'A' && inASCII <= 'Z' )
             ||
             ( inASCII >= 'a' && inASCII <= 'z' ) ) {
-            
+
             return;
             }
-        
+
         }
-    
-    }
+
     if( inASCII == 127 || inASCII == 8 ) {
         // delete
-        int curIndex = getElementBeforeNumber(mCursorPosition);
-        if (curIndex > 0) {
-            mSelectionStart = mCharDict.getElementDirectFast(curIndex-1);
-            mSelectionEnd = mCursorPosition;
-        }
-        
+        // (deleteHit removes a whole UTF-8 character at a time)
         deleteHit();
-        mCharDict.deleteElement(curIndex);
-        mSelectionStart = -1;
-        mSelectionEnd = -1;
+
         mHoldDeleteSteps = 0;
 
         clearArrowRepeat();
@@ -963,7 +1161,6 @@ void TextField::keyDown( unsigned char inASCII ) {
         if( processedChar != 0 ) {
             // newline is allowed
             insertCharacter( processedChar );
-            insertCharIndex(mCursorPosition - 1);
             mHoldDeleteSteps = -1;
             mFirstDeleteRepeatDone = false;
             
@@ -983,10 +1180,9 @@ void TextField::keyDown( unsigned char inASCII ) {
         unsigned char processedChar = processCharacter( inASCII );    
 
         if( processedChar != 0 ) {
-            
+
             insertCharacter( processedChar );
-            insertCharIndex(mCursorPosition - 1);
-        }
+            }
         
         mHoldDeleteSteps = -1;
         mFirstDeleteRepeatDone = false;
@@ -1046,6 +1242,12 @@ void TextField::deleteHit() {
                      mText[ newCursorPos - 1 ] == '\r' ) ) {
                 newCursorPos --;
                 }
+            }
+        else {
+            // plain backspace:
+            // expand to remove the whole UTF-8 character
+            // containing the byte before the cursor
+            newCursorPos = utf8CharStart( mText, newCursorPos );
             }
         
         // section cleared no matter what when delete is hit
@@ -1126,8 +1328,10 @@ void TextField::leftHit() {
             }
         
         }
-    else {    
+    else {
         mCursorPosition --;
+        // snap to the start of the UTF-8 character we stepped into
+        mCursorPosition = utf8CharStart( mText, mCursorPosition );
         if( mCursorPosition < 0 ) {
             mCursorPosition = 0;
             }
@@ -1187,6 +1391,12 @@ void TextField::rightHit() {
         }
     else {
         mCursorPosition ++;
+        // skip UTF-8 continuation bytes (10xxxxxx)
+        // to land on the next character boundary
+        while( mCursorPosition < (int)strlen( mText ) &&
+               ( (unsigned char)mText[ mCursorPosition ] & 0xC0 ) == 0x80 ) {
+            mCursorPosition ++;
+            }
         if( mCursorPosition > (int)strlen( mText ) ) {
             mCursorPosition = strlen( mText );
             }
@@ -1475,6 +1685,11 @@ void TextField::setShiftArrowsCanSelect( char inCanSelect ) {
 
 void TextField::usePasteShortcut( char inShortcutOn ) {
     mUsePasteShortcut = inShortcutOn;
+    }
+
+
+void TextField::setPasteShortcutForNewFields( char inOn ) {
+    sPasteShortcutForNewFields = inOn;
     }
 
 

@@ -132,6 +132,12 @@ class TextField : public PageComponent, public ActionListenerList {
         
         // defaults to off
         void usePasteShortcut( char inShortcutOn );
+
+        // sets the default state of the clipboard shortcuts for fields
+        // constructed after this call
+        // (the editor turns this on to give every text field
+        //  copy/paste/cut/select-all)
+        static void setPasteShortcutForNewFields( char inOn );
         
 
         
@@ -145,7 +151,10 @@ class TextField : public PageComponent, public ActionListenerList {
         virtual void draw();
 
         virtual void pointerMove( float inX, float inY );
-        
+
+        virtual void pointerDown( float inX, float inY );
+        virtual void pointerDrag( float inX, float inY );
+
         virtual void pointerUp( float inX, float inY );
 
         virtual void keyDown( unsigned char inASCII );
@@ -223,9 +232,7 @@ class TextField : public PageComponent, public ActionListenerList {
 
         char *mText;
         int mTextLen;
-        
 
-        SimpleVector<int> mCharDict = SimpleVector<int> (128); //用于记录每个unicode字符在utf8数组中的位置
 
         int mCursorPosition;
         
@@ -257,10 +264,16 @@ class TextField : public PageComponent, public ActionListenerList {
         int *mSelectionAdjusting;
         
         char mShiftPlusArrowsCanSelect;
-        
+
+        // true while the mouse is dragging out a selection
+        char mDragSelecting;
+        int mDragSelectAnchor;
+
         int mCursorFlashSteps;
         
         char mUsePasteShortcut;
+
+        static char sPasteShortcutForNewFields;
 
         char mDrawLabelWithShadow;
         
@@ -270,6 +283,10 @@ class TextField : public PageComponent, public ActionListenerList {
         void deleteHit();
         void leftHit();
         void rightHit();
+
+        // moves the cursor to the text position closest to an x
+        // coordinate inside the field
+        void placeCursorAtX( float inX );
         
         void clearArrowRepeat();
 
@@ -278,9 +295,6 @@ class TextField : public PageComponent, public ActionListenerList {
 
         // returns 0 if character completely forbidden by field rules
         unsigned char processCharacter( unsigned char inASCII );
-        
-        int getElementBeforeNumber(int val);
-        void insertCharIndex(int val);
 
         // clever (!) way of handling focus?
 
