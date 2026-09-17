@@ -18,10 +18,6 @@ typedef struct SpriteRecord {
 
         char multiplicativeBlend;
 
-        // sprite-level additive blending flag (5th field in sprite .txt)
-        // set automatically by bakeSprite when baked layers used it
-        char additiveBlend;
-
         // maximum pixel dimension
         // (used for sizing in pickers)
         int maxD;
@@ -101,8 +97,6 @@ SpriteRecord *getSpriteRecord( int inID );
 
 char getUsesMultiplicativeBlending( int inID );
 
-char getUsesAdditiveBlending( int inID );
-
 // not destroyed by caller
 char *getSpriteTag( int inID );
 
@@ -130,12 +124,11 @@ SpriteRecord **searchSprites( const char *inSearch,
 
 
 // returns new ID, or -1 if adding failed
-int addSprite( const char *inTag, SpriteHandle inSprite,
+int addSprite( const char *inTag, SpriteHandle inSprite, 
                Image *inSourceImage,
                char inMultiplicativeBlending,
                int inCenterAnchorXOffset = 0,
-               int inCenterAnchorYOffset = 0,
-               char inAdditiveBlending = false );
+               int inCenterAnchorYOffset = 0 );
 
 
 
@@ -151,9 +144,7 @@ int bakeSprite( const char *inTag,
                 doublePair *inSpritePos,
                 double *inSpriteRot,
                 char *inSpriteHFlips,
-                FloatRGB *inSpriteColors,
-                // per-sprite additive blend flags, or NULL for none
-                char *inSpriteAdditiveBlend = NULL );
+                FloatRGB *inSpriteColors );
 
 
                 
