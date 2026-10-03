@@ -16,6 +16,7 @@
 #include "minorGems/util/SimpleVector.h"
 #include "minorGems/network/SocketServer.h"
 #include "minorGems/network/SocketPoll.h"
+#include "ServerSendBuffer.h"
 #include "minorGems/network/web/WebRequest.h"
 #include "minorGems/network/web/URLUtils.h"
 
@@ -745,6 +746,7 @@ typedef struct LiveObject {
 
         Socket *sock;
         SimpleVector<char> *sockBuffer;
+        ServerSendBuffer outgoing;
         
         // indicates that some messages were sent to this player this 
         // frame, and they need a FRAME terminator message
@@ -4235,6 +4237,109 @@ static int getMaxChunkDimension() {
 
 static SocketPoll sockPoll;
 
+struct NetworkOutputSettings {
+    int debug = 0;
+    int buffered = 0;
+    double reportInterval = 5;
+    double sendInterval = 0.020;
+    size_t maxBytes = 1048576;
+    size_t maxTotalBytes = 67108864;
+    double maxAge = 15;
+};
+
+static NetworkOutputSettings networkOutput;
+static double nextNetworkSettingsRead = 0;
+
+static void readNetworkOutputSettings( double now ) {
+    if( now < nextNetworkSettingsRead ) return;
+    nextNetworkSettingsRead = now + 5;
+    NetworkOutputSettings settings;
+    settings.debug = SettingsManager::getIntSetting( "networkWriteDebug", 0 );
+    settings.buffered = SettingsManager::getIntSetting( "networkSendBufferEnabled", 0 );
+    settings.reportInterval = (std::max)( 1.0, SettingsManager::getDoubleSetting(
+        "networkWriteDebugInterval", 5 ) );
+    settings.sendInterval = (std::max)( 0, (std::min)( 1000,
+        SettingsManager::getIntSetting( "networkSendBufferIntervalMS", 20 ) ) ) / 1000.0;
+    settings.maxBytes = (std::max)( 65536, (std::min)( 67108864,
+        SettingsManager::getIntSetting( "networkSendBufferMaxBytes", 1048576 ) ) );
+    settings.maxTotalBytes = (std::max)( 1048576, (std::min)( 268435456,
+        SettingsManager::getIntSetting( "networkSendBufferMaxTotalBytes", 67108864 ) ) );
+    settings.maxAge = (std::max)( 1.0, (std::min)( 300.0,
+        SettingsManager::getDoubleSetting( "networkSendBufferMaxAgeSeconds", 15 ) ) );
+    if( settings.debug != networkOutput.debug || settings.buffered != networkOutput.buffered ) {
+        AppLog::infoF( "[NET_CONFIG] debug=%d buffered=%d interval_ms=%.0f "
+                       "max_pending=%lu max_total=%lu max_age=%.1f report_seconds=%.1f",
+                       settings.debug, settings.buffered, settings.sendInterval * 1000,
+                       (unsigned long)settings.maxBytes, (unsigned long)settings.maxTotalBytes, settings.maxAge,
+                       settings.reportInterval );
+        }
+    networkOutput = settings;
+    }
+
+struct KernelSendStats {
+    int sendBuffer = -1, outq = -1;
+    int unacked = -1, retransmits = -1, rttUS = -1;
+};
+
+static KernelSendStats getKernelSendStats( Socket *sock ) {
+    KernelSendStats result;
+    if( sock == NULL ) return result;
+#ifdef WIN_32
+    int length = sizeof result.sendBuffer;
+#else
+    socklen_t length = sizeof result.sendBuffer;
+#endif
+    if( getsockopt( sock->mNativeSocketID, SOL_SOCKET, SO_SNDBUF,
+                    (char*)&result.sendBuffer, &length ) != 0 ) result.sendBuffer = -1;
+#ifdef __linux__
+    if( ioctl( sock->mNativeSocketID, SIOCOUTQ, &result.outq ) != 0 ) result.outq = -1;
+    struct tcp_info info = {};
+    length = sizeof info;
+    if( getsockopt( sock->mNativeSocketID, IPPROTO_TCP, TCP_INFO, &info, &length ) == 0 ) {
+        result.unacked = info.tcpi_unacked;
+        result.retransmits = info.tcpi_total_retrans;
+        result.rttUS = info.tcpi_rtt;
+        }
+#endif
+    return result;
+    }
+
+static void logPlayerNetworkStats( LiveObject *player, const char *tag, double now ) {
+    const ServerSendBuffer &output = player->outgoing;
+    const ServerSendStats &s = output.stats;
+    KernelSendStats k = getKernelSendStats( player->sock );
+    double window = output.reportStart == 0 ? 0 : now - output.reportStart;
+    AppLog::infoF( "[%s] player=%d world=(%d,%d) buffered=%d window=%.3f "
+                   "messages=%llu requested_bytes=%llu send_calls=%llu sent_bytes=%llu "
+                   "mx_messages=%llu mx_cells=%llu mx_plain_bytes=%llu mx_wire_bytes=%llu "
+                   "mx_max_cells=%d would_block=%llu partial=%llu interrupted=%llu "
+                   "pending=%lu pending_messages=%lu peak_pending=%lu total_queue_memory=%lu "
+                   "oldest_ms=%.1f sndbuf=%d "
+                   "kernel_outq=%d unacked=%d retrans_total=%d rtt_us=%d",
+                   tag, player->id, player->xd, player->yd, networkOutput.buffered, window,
+                   (unsigned long long)s.messages, (unsigned long long)s.requestedBytes,
+                   (unsigned long long)s.sendCalls, (unsigned long long)s.sentBytes,
+                   (unsigned long long)s.mxMessages, (unsigned long long)s.mxCells,
+                   (unsigned long long)s.mxPlainBytes, (unsigned long long)s.mxWireBytes,
+                   s.maxMXCells, (unsigned long long)s.wouldBlock,
+                   (unsigned long long)s.partialWrites, (unsigned long long)s.interrupts,
+                   (unsigned long)output.pending(), (unsigned long)output.pendingMessages(),
+                   (unsigned long)s.peakPendingBytes, (unsigned long)ServerSendBuffer::totalAllocated(),
+                   output.oldestAge( now ) * 1000, k.sendBuffer, k.outq,
+                   k.unacked, k.retransmits, k.rttUS );
+    }
+
+static void logNetworkWriteFailure( LiveObject *player, const char *reason ) {
+    const ServerSendBuffer &output = player->outgoing;
+    AppLog::infoF( "[NET_WRITE_ERROR] player=%d reason=%s type=%s requested=%d "
+                   "result=%d error=%d (%s) source=%s:%d",
+                   player->id, reason, output.lastType, output.lastRequested,
+                   output.lastSent, output.lastError,
+                   ServerSocketWriter::errorName( output.lastError ),
+                   output.lastFunction, output.lastLine );
+    logPlayerNetworkStats( player, "NET_WRITE_ERROR_STATS", Time::getCurrentTime() );
+    }
+
 
 
 static void setPlayerDisconnected( LiveObject *inPlayer, 
@@ -4251,6 +4356,11 @@ static void setPlayerDisconnected( LiveObject *inPlayer,
 
     AppLog::infoF( "Player %d (%s) marked as disconnected (%s) in func (%s:%d)",
                    inPlayer->id, inPlayer->email, inReason, func, line );
+
+    if( networkOutput.debug ) {
+        logPlayerNetworkStats( inPlayer, "NET_CLOSE", Time::getCurrentTime() );
+        }
+    inPlayer->outgoing.reset();
 
     // 旁观者无重返价值:断连即标记 error+deleteSent,由 despawn 块本帧/下帧移除;
     // 跳过下面的 vogMode 清零与 preVogPos 回滚(那是管理员 god-mode 退出用的,
@@ -4315,6 +4425,101 @@ static void setPlayerDisconnected( LiveObject *inPlayer,
 
 
 
+// Return the bytes accepted by the transport. Buffered mode copies them before
+// callers release their temporary messages. FreshConnection handshakes keep
+// using their existing direct path; every established-player write goes here.
+static int sendPlayerData( LiveObject *player, unsigned char *data, int size,
+                           const char *function, int line ) {
+    if( size == 0 ) return 0;
+    if( size < 0 || data == NULL || !player->connected || player->sock == NULL ) return -1;
+    ServerSendBuffer &output = player->outgoing;
+    double now = Time::getCurrentTime();
+    output.observeMessage( data, size, now, function, line );
+    if( !output.socketPrepared ) {
+        ServerSocketWriter::setNoDelay( player->sock );
+        output.socketPrepared = true;
+        }
+    // Drain an existing queue before reverting to direct mode on a live toggle.
+    if( networkOutput.buffered || output.pending() > 0 || output.failure != NULL ) {
+        if( output.enqueue( data, size, now, networkOutput.sendInterval, networkOutput.maxBytes, networkOutput.maxTotalBytes ) ) {
+            return size;
+            }
+        logNetworkWriteFailure( player, output.failure );
+        return -1;
+        }
+    ServerWriteResult result = ServerSocketWriter::send( player->sock, data, size );
+    output.observeWrite( result, size );
+    if( result.sent != size ) logNetworkWriteFailure( player, "Direct socket write incomplete" );
+    return result.sent;
+    }
+
+static void stepPlayerOutput( LiveObject *player, double now ) {
+    if( !player->connected || player->sock == NULL ) return;
+    ServerSendBuffer &output = player->outgoing;
+    double interval = networkOutput.buffered ? networkOutput.sendInterval : 0;
+    if( !output.drain( now, interval, networkOutput.maxAge, 65536,
+                      [player]( const unsigned char *data, int size ) {
+                          return ServerSocketWriter::send( player->sock, data, size );
+                          } ) ) {
+        const char *reason = output.failure;
+        logNetworkWriteFailure( player, reason );
+        setPlayerDisconnected( player, reason, __func__, __LINE__ );
+        return;
+        }
+    if( output.reportStart != 0 && now - output.reportStart >= networkOutput.reportInterval ) {
+        if( networkOutput.debug && (output.stats.messages > 0 || output.pending() > 0) ) {
+            logPlayerNetworkStats( player, "NET_WRITE", now );
+            }
+        output.restartReport( now );
+        }
+    }
+
+static double networkOutputPollTimeout( double timeout ) {
+    double now = Time::getCurrentTime();
+    SimpleVector<LiveObject> *lists[] = { &players, &tutorialLoadingPlayers };
+    for( SimpleVector<LiveObject> *list : lists ) {
+        for( int i=0; i<list->size(); i++ ) {
+            const LiveObject *player = list->getElement( i );
+            if( player->connected && player->outgoing.pending() > 0 ) {
+                timeout = (std::min)( timeout, (std::max)( 0.0, player->outgoing.due() - now ) );
+                }
+            }
+        }
+    return timeout;
+    }
+
+struct MapUpdateStats {
+    double start = 0, maxStepMS = 0;
+    uint64_t steps = 0, changedCells = 0;
+    int maxChangedCells = 0;
+};
+static MapUpdateStats mapUpdateStats;
+
+static void recordMapUpdateStep( int cells, double milliseconds ) {
+    if( !networkOutput.debug ) {
+        mapUpdateStats = MapUpdateStats();
+        return;
+        }
+    double now = Time::getCurrentTime();
+    if( mapUpdateStats.start == 0 ) mapUpdateStats.start = now;
+    mapUpdateStats.steps++;
+    mapUpdateStats.changedCells += cells;
+    mapUpdateStats.maxChangedCells = (std::max)( cells, mapUpdateStats.maxChangedCells );
+    mapUpdateStats.maxStepMS = (std::max)( milliseconds, mapUpdateStats.maxStepMS );
+    if( now - mapUpdateStats.start >= networkOutput.reportInterval ) {
+        if( networkOutput.debug ) {
+            AppLog::infoF( "[MAP_UPDATE] window=%.3f steps=%llu changed_cells=%llu "
+                           "max_batch=%d map_step_max_ms=%.3f",
+                           now - mapUpdateStats.start,
+                           (unsigned long long)mapUpdateStats.steps,
+                           (unsigned long long)mapUpdateStats.changedCells,
+                           mapUpdateStats.maxChangedCells, mapUpdateStats.maxStepMS );
+            }
+        mapUpdateStats = MapUpdateStats();
+        mapUpdateStats.start = now;
+        }
+    }
+
 // if inOnePlayerOnly set, we only send to that player
 void sendGlobalMessage( char *inMessage,
                         LiveObject *inOnePlayerOnly ) {
@@ -4344,9 +4549,8 @@ void sendGlobalMessage( char *inMessage,
                 minGlobalMessageSpacingSeconds ) {
                 
                 int numSent = 
-                    o->sock->send( (unsigned char*)fullMessage, 
-                                   len, 
-                                   false, false );
+                    sendPlayerData( o, (unsigned char*)fullMessage,
+                                    len, __func__, __LINE__ );
                 
                 o->lastGlobalMessageTime = curTime;
                 
@@ -4572,9 +4776,8 @@ int sendMapChunkMessage( LiveObject *inO,
                                                           &messageLength );
                 
         numSent += 
-            inO->sock->send( mapChunkMessage, 
-                             messageLength, 
-                             false, false );
+            sendPlayerData( inO, mapChunkMessage,
+                            messageLength, __func__, __LINE__ );
                 
         delete [] mapChunkMessage;
         }
@@ -4659,9 +4862,8 @@ int sendMapChunkMessage( LiveObject *inO,
             messageLength += len;
             
             numSent += 
-                inO->sock->send( mapChunkMessage, 
-                                 len, 
-                                 false, false );
+                sendPlayerData( inO, mapChunkMessage,
+                                len, __func__, __LINE__ );
             
             delete [] mapChunkMessage;
             }
@@ -4679,9 +4881,8 @@ int sendMapChunkMessage( LiveObject *inO,
             messageLength += len;
             
             numSent += 
-                inO->sock->send( mapChunkMessage, 
-                                 len, 
-                                 false, false );
+                sendPlayerData( inO, mapChunkMessage,
+                                len, __func__, __LINE__ );
             
             delete [] mapChunkMessage;
             }
@@ -7283,6 +7484,7 @@ int processLoggedInPlayer( char inAllowReconnect,
             
             o->sock = inSock;
             o->sockBuffer = inSockBuffer;
+            o->outgoing.reset();
             
             // they are connecting again, need to send them everything again
             o->firstMapSent = false;
@@ -10886,9 +11088,8 @@ void sendMessageToPlayer( LiveObject *inPlayer,
         }
 
     int numSent = 
-        inPlayer->sock->send( message, 
-                              len, 
-                              false, false );
+        sendPlayerData( inPlayer, message,
+                        len, __func__, __LINE__ );
         
     if( numSent != len ) {
         setPlayerDisconnected( inPlayer, "Socket write failed",  __func__ , __LINE__);
@@ -11300,10 +11501,8 @@ void apocalypseStep() {
                 if( !nextPlayer->error && nextPlayer->connected ) {
                     
                     int numSent = 
-                        nextPlayer->sock->send( 
-                            (unsigned char*)message, 
-                            messageLength,
-                            false, false );
+                        sendPlayerData( nextPlayer, (unsigned char*)message,
+                                        messageLength, __func__, __LINE__ );
                     
                     nextPlayer->gotPartOfThisFrame = true;
                     
@@ -11428,10 +11627,8 @@ void apocalypseStep() {
                         if( !nextPlayer->error && nextPlayer->connected ) {
                     
                             int numSent = 
-                                nextPlayer->sock->send( 
-                                    (unsigned char*)message, 
-                                    messageLength,
-                                    false, false );
+                                sendPlayerData( nextPlayer, (unsigned char*)message,
+                                                messageLength, __func__, __LINE__ );
                             
                             nextPlayer->gotPartOfThisFrame = true;
                     
@@ -11482,10 +11679,8 @@ void monumentStep() {
 
 
                 int numSent = 
-                    nextPlayer->sock->send( 
-                        (unsigned char*)message, 
-                        messageLength,
-                        false, false );
+                    sendPlayerData( nextPlayer, (unsigned char*)message,
+                                    messageLength, __func__, __LINE__ );
                 
                 nextPlayer->gotPartOfThisFrame = true;
                 
@@ -13590,6 +13785,7 @@ int main() {
     while( !quit ) {
 
         double curStepTime = Time::getCurrentTime();
+        readNetworkOutputSettings( curStepTime );
         
         // flush past players hourly
         if( curStepTime - lastPastPlayerFlushTime > 3600 ) {
@@ -13690,10 +13886,8 @@ int main() {
                     }
 
                 if( nextPlayer->connected ) {    
-                    nextPlayer->sock->send( 
-                        (unsigned char*)shutdownMessage, 
-                        messageLength,
-                        false, false );
+                    sendPlayerData( nextPlayer, (unsigned char*)shutdownMessage,
+                                    messageLength, __func__, __LINE__ );
                 
                     nextPlayer->gotPartOfThisFrame = true;
                     }
@@ -14038,7 +14232,12 @@ int main() {
         // come in, and only wake up when some timed action needs to be
         // handled
         
-        readySock = sockPoll.wait( (int)( pollTimeout * 1000 ) );
+        pollTimeout = networkOutputPollTimeout( pollTimeout );
+        // Keep direct mode's original timing for diagnosis. Buffered mode
+        // rounds positive sub-ms deadlines up instead of spinning on wait(0).
+        int pollTimeoutMS = networkOutput.buffered ?
+            (int)ceil( pollTimeout * 1000 ) : (int)( pollTimeout * 1000 );
+        readySock = sockPoll.wait( pollTimeoutMS );
         
         
         
@@ -15080,8 +15279,8 @@ int main() {
 					    seed = nextConnection->spawnCode;
 				    }
 				    HostAddress* a = nextConnection->sock->getRemoteHostAddress();
-                                    AppLog::info( "Got new player %s (IP:%s, Seed:%s) logged in",
-					       nextConnection->email, a->mAddressString, seed);
+                                    AppLog::infoF( "Got new player %s (IP:%s, Seed:%s) logged in",
+					       nextConnection->email, a->mAddressString, seed.c_str());
                                     
                                     delete nextConnection->ticketServerRequest;
                                     nextConnection->ticketServerRequest = NULL;
@@ -15891,9 +16090,8 @@ int main() {
                                              &length );
                         
                         int numSent = 
-                            nextPlayer->sock->send( mapChunkMessage, 
-                                                    length, 
-                                                    false, false );
+                            sendPlayerData( nextPlayer, mapChunkMessage,
+                                            length, __func__, __LINE__ );
                         
                         nextPlayer->gotPartOfThisFrame = true;
                         
@@ -23351,7 +23549,10 @@ int main() {
 
         // add changes from auto-decays on map, 
         // mixed with player-caused changes
+        double mapStepStart = networkOutput.debug ? Time::getCurrentTime() : 0;
         stepMap( &mapChanges, &mapChangesPos );
+        recordMapUpdateStep( mapChanges.size(), networkOutput.debug ?
+                            (Time::getCurrentTime() - mapStepStart) * 1000 : 0 );
         
         
 
@@ -24535,10 +24736,8 @@ int main() {
                 // are holding post-wound come later                
                 if( dyingMessage != NULL && nextPlayer->connected ) {
                     int numSent = 
-                        nextPlayer->sock->send( 
-                            dyingMessage, 
-                            dyingMessageLength, 
-                            false, false );
+                        sendPlayerData( nextPlayer, dyingMessage,
+                                        dyingMessageLength, __func__, __LINE__ );
                     
                     nextPlayer->gotPartOfThisFrame = true;
 
@@ -24552,10 +24751,8 @@ int main() {
                 // EVERYONE gets info about now-healed players           
                 if( healingMessage != NULL && nextPlayer->connected ) {
                     int numSent = 
-                        nextPlayer->sock->send( 
-                            healingMessage, 
-                            healingMessageLength, 
-                            false, false );
+                        sendPlayerData( nextPlayer, healingMessage,
+                                        healingMessageLength, __func__, __LINE__ );
                     
                     nextPlayer->gotPartOfThisFrame = true;
                     
@@ -24569,10 +24766,8 @@ int main() {
                 // EVERYONE gets info about emots           
                 if( emotMessage != NULL && nextPlayer->connected ) {
                     int numSent = 
-                        nextPlayer->sock->send( 
-                            emotMessage, 
-                            emotMessageLength, 
-                            false, false );
+                        sendPlayerData( nextPlayer, emotMessage,
+                                        emotMessageLength, __func__, __LINE__ );
                     
                     nextPlayer->gotPartOfThisFrame = true;
                     
@@ -24687,10 +24882,8 @@ int main() {
                                 nextPlayer->id );
                             
                             int numSent = 
-                                nextPlayer->sock->send( 
-                                    updateMessage, 
-                                    updateMessageLength, 
-                                    false, false );
+                                sendPlayerData( nextPlayer, updateMessage,
+                                                updateMessageLength, __func__, __LINE__ );
                             
                             nextPlayer->gotPartOfThisFrame = true;
                             
@@ -24769,10 +24962,8 @@ int main() {
                                 }
 
                             int numSent = 
-                                nextPlayer->sock->send( 
-                                    moveMessage, 
-                                    moveMessageLength, 
-                                    false, false );
+                                sendPlayerData( nextPlayer, moveMessage,
+                                                moveMessageLength, __func__, __LINE__ );
                             
                             nextPlayer->gotPartOfThisFrame = true;
                             
@@ -24836,10 +25027,8 @@ int main() {
                         }
                         
                     int numSent = 
-                        nextPlayer->sock->send( 
-                            outOfRangeMessage, 
-                            outOfRangeMessageLength, 
-                            false, false );
+                        sendPlayerData( nextPlayer, outOfRangeMessage,
+                                        outOfRangeMessageLength, __func__, __LINE__ );
                         
                     nextPlayer->gotPartOfThisFrame = true;
 
@@ -24879,6 +25068,8 @@ int main() {
                         
                         unsigned char *mapChangeMessage = NULL;
                         int mapChangeMessageLength = 0;
+                        int mapChangePlainLength = 0;
+                        int mapChangeCells = 0;
                         SimpleVector<char> mapChangeChars;
 
                         for( int u=0; u<mapChanges.size(); u++ ) {
@@ -24901,6 +25092,7 @@ int main() {
                                     nextPlayer->birthPos.y );
                             
                             mapChangeChars.appendElementString( lineString );
+                            mapChangeCells++;
                             delete [] lineString;
                             }
                         
@@ -24915,6 +25107,7 @@ int main() {
 
                             mapChangeMessageLength = 
                                 strlen( mapChangeMessageText );
+                            mapChangePlainLength = mapChangeMessageLength;
             
                             if( mapChangeMessageLength < 
                                 maxUncompressedSize ) {
@@ -24934,11 +25127,12 @@ int main() {
                         
                         if( mapChangeMessage != NULL ) {
 
+                            nextPlayer->outgoing.observeMX( mapChangeCells,
+                                mapChangePlainLength, mapChangeMessageLength );
+
                             int numSent = 
-                                nextPlayer->sock->send( 
-                                    mapChangeMessage, 
-                                    mapChangeMessageLength, 
-                                    false, false );
+                                sendPlayerData( nextPlayer, mapChangeMessage,
+                                                mapChangeMessageLength, __func__, __LINE__ );
                             
                             nextPlayer->gotPartOfThisFrame = true;
                             
@@ -25250,10 +25444,8 @@ int main() {
                         
                         
                         int numSent = 
-                            nextPlayer->sock->send( 
-                                message, 
-                                messageLen, 
-                                false, false );
+                            sendPlayerData( nextPlayer, message,
+                                            messageLen, __func__, __LINE__ );
                         
                         delete [] message;
                         
@@ -25335,10 +25527,8 @@ int main() {
                             }
 
                         int numSent = 
-                            nextPlayer->sock->send( 
-                                (unsigned char*)message,
-                                len, 
-                                false, false );
+                            sendPlayerData( nextPlayer, (unsigned char*)message,
+                                            len, __func__, __LINE__ );
                         
                         delete [] message;
                         
@@ -25402,10 +25592,8 @@ int main() {
 
                     if( deleteUpdateMessage != NULL ) {
                         int numSent = 
-                            nextPlayer->sock->send( 
-                                deleteUpdateMessage, 
-                                deleteUpdateMessageLength, 
-                                false, false );
+                            sendPlayerData( nextPlayer, deleteUpdateMessage,
+                                            deleteUpdateMessageLength, __func__, __LINE__ );
                     
                         nextPlayer->gotPartOfThisFrame = true;
                     
@@ -25423,10 +25611,8 @@ int main() {
                 // EVERYONE gets lineage info for new babies
                 if( lineageMessage != NULL && nextPlayer->connected ) {
                     int numSent = 
-                        nextPlayer->sock->send( 
-                            lineageMessage, 
-                            lineageMessageLength, 
-                            false, false );
+                        sendPlayerData( nextPlayer, lineageMessage,
+                                        lineageMessageLength, __func__, __LINE__ );
                     
                     nextPlayer->gotPartOfThisFrame = true;
                     
@@ -25440,10 +25626,8 @@ int main() {
                 // EVERYONE gets curse info for new babies
                 if( cursesMessage != NULL && nextPlayer->connected ) {
                     int numSent = 
-                        nextPlayer->sock->send( 
-                            cursesMessage, 
-                            cursesMessageLength, 
-                            false, false );
+                        sendPlayerData( nextPlayer, cursesMessage,
+                                        cursesMessageLength, __func__, __LINE__ );
                     
                     nextPlayer->gotPartOfThisFrame = true;
                     
@@ -25456,10 +25640,8 @@ int main() {
                 // EVERYONE gets newly-given names
                 if( namesMessage != NULL && nextPlayer->connected ) {
                     int numSent = 
-                        nextPlayer->sock->send( 
-                            namesMessage, 
-                            namesMessageLength, 
-                            false, false );
+                        sendPlayerData( nextPlayer, namesMessage,
+                                        namesMessageLength, __func__, __LINE__ );
                     
                     nextPlayer->gotPartOfThisFrame = true;
                     
@@ -25527,10 +25709,8 @@ int main() {
                         int messageLength = strlen( foodMessage );
                         
                         int numSent = 
-                            nextPlayer->sock->send( 
-                                (unsigned char*)foodMessage, 
-                                messageLength,
-                                false, false );
+                            sendPlayerData( nextPlayer, (unsigned char*)foodMessage,
+                                            messageLength, __func__, __LINE__ );
                         
                         nextPlayer->gotPartOfThisFrame = true;
                         
@@ -25560,10 +25740,8 @@ int main() {
                     int messageLength = strlen( heatMessage );
                     
                     int numSent = 
-                         nextPlayer->sock->send( 
-                             (unsigned char*)heatMessage, 
-                             messageLength,
-                             false, false );
+                         sendPlayerData( nextPlayer, (unsigned char*)heatMessage,
+                                         messageLength, __func__, __LINE__ );
                     
                     nextPlayer->gotPartOfThisFrame = true;
                     
@@ -25589,10 +25767,8 @@ int main() {
                     int messageLength = strlen( tokenMessage );
                     
                     int numSent = 
-                         nextPlayer->sock->send( 
-                             (unsigned char*)tokenMessage, 
-                             messageLength,
-                             false, false );
+                         sendPlayerData( nextPlayer, (unsigned char*)tokenMessage,
+                                         messageLength, __func__, __LINE__ );
 
                     nextPlayer->gotPartOfThisFrame = true;
                     
@@ -25706,16 +25882,24 @@ int main() {
             
             if( nextPlayer->gotPartOfThisFrame && nextPlayer->connected ) {
                 int numSent = 
-                    nextPlayer->sock->send( 
-                        (unsigned char*)frameMessage, 
-                        frameMessageLength,
-                        false, false );
+                    sendPlayerData( nextPlayer, (unsigned char*)frameMessage,
+                                    frameMessageLength, __func__, __LINE__ );
 
                 if( numSent != frameMessageLength ) {
                     setPlayerDisconnected( nextPlayer, "Socket write failed",  __func__ , __LINE__);
                     }
                 }
             nextPlayer->gotPartOfThisFrame = false;
+            }
+
+        // All frame bytes have now been enqueued, including FM. Coalesce only
+        // the TCP writes; retain every original protocol message and boundary.
+        double outputStepTime = Time::getCurrentTime();
+        for( int i=0; i<players.size(); i++ ) {
+            stepPlayerOutput( players.getElement(i), outputStepTime );
+            }
+        for( int i=0; i<tutorialLoadingPlayers.size(); i++ ) {
+            stepPlayerOutput( tutorialLoadingPlayers.getElement(i), outputStepTime );
             }
         
 
@@ -25733,6 +25917,9 @@ int main() {
                 AppLog::infoF( "%d remaining player(s) alive on server ",
                                players.size() - 1 );
                 
+                // Cancel any final backlog before deleting this connection.
+                nextPlayer->outgoing.reset();
+
                 // 旁观者无族谱/统计价值,不入 past-life 记录,避免 0 寿命旁观污染族谱。
                 if( ! nextPlayer->spectator ) {
                     addPastPlayer( nextPlayer );
