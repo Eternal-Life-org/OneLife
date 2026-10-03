@@ -4238,9 +4238,6 @@ static int getMaxChunkDimension() {
 static SocketPoll sockPoll;
 
 struct NetworkOutputSettings {
-    int debug = 0;
-    int buffered = 0;
-    double reportInterval = 5;
     double sendInterval = 0.020;
     size_t maxBytes = 1048576;
     size_t maxTotalBytes = 67108864;
@@ -4248,16 +4245,11 @@ struct NetworkOutputSettings {
 };
 
 static NetworkOutputSettings networkOutput;
-static double nextNetworkSettingsRead = 0;
 
-static void readNetworkOutputSettings( double now ) {
-    if( now < nextNetworkSettingsRead ) return;
-    nextNetworkSettingsRead = now + 5;
+// Functional limits are loaded once at startup; no diagnostic mode or live
+// switch back to the unsafe single-send path.
+static void initNetworkOutputSettings() {
     NetworkOutputSettings settings;
-    settings.debug = SettingsManager::getIntSetting( "networkWriteDebug", 0 );
-    settings.buffered = SettingsManager::getIntSetting( "networkSendBufferEnabled", 0 );
-    settings.reportInterval = (std::max)( 1.0, SettingsManager::getDoubleSetting(
-        "networkWriteDebugInterval", 5 ) );
     settings.sendInterval = (std::max)( 0, (std::min)( 1000,
         SettingsManager::getIntSetting( "networkSendBufferIntervalMS", 20 ) ) ) / 1000.0;
     settings.maxBytes = (std::max)( 65536, (std::min)( 67108864,
@@ -4266,14 +4258,10 @@ static void readNetworkOutputSettings( double now ) {
         SettingsManager::getIntSetting( "networkSendBufferMaxTotalBytes", 67108864 ) ) );
     settings.maxAge = (std::max)( 1.0, (std::min)( 300.0,
         SettingsManager::getDoubleSetting( "networkSendBufferMaxAgeSeconds", 15 ) ) );
-    if( settings.debug != networkOutput.debug || settings.buffered != networkOutput.buffered ) {
-        AppLog::infoF( "[NET_CONFIG] debug=%d buffered=%d interval_ms=%.0f "
-                       "max_pending=%lu max_total=%lu max_age=%.1f report_seconds=%.1f",
-                       settings.debug, settings.buffered, settings.sendInterval * 1000,
-                       (unsigned long)settings.maxBytes, (unsigned long)settings.maxTotalBytes, settings.maxAge,
-                       settings.reportInterval );
-        }
     networkOutput = settings;
+    AppLog::infoF( "[NET_CONFIG] interval_ms=%.0f max_pending=%lu max_total=%lu max_age=%.1f",
+                   settings.sendInterval * 1000, (unsigned long)settings.maxBytes,
+                   (unsigned long)settings.maxTotalBytes, settings.maxAge );
     }
 
 struct KernelSendStats {
@@ -4304,40 +4292,27 @@ static KernelSendStats getKernelSendStats( Socket *sock ) {
     return result;
     }
 
-static void logPlayerNetworkStats( LiveObject *player, const char *tag, double now ) {
+// Query kernel counters only on a failed connection, never on normal output.
+static void logNetworkWriteFailure( LiveObject *player, const char *reason ) {
     const ServerSendBuffer &output = player->outgoing;
     const ServerSendStats &s = output.stats;
     KernelSendStats k = getKernelSendStats( player->sock );
-    double window = output.reportStart == 0 ? 0 : now - output.reportStart;
-    AppLog::infoF( "[%s] player=%d world=(%d,%d) buffered=%d window=%.3f "
-                   "messages=%llu requested_bytes=%llu send_calls=%llu sent_bytes=%llu "
-                   "mx_messages=%llu mx_cells=%llu mx_plain_bytes=%llu mx_wire_bytes=%llu "
-                   "mx_max_cells=%d would_block=%llu partial=%llu interrupted=%llu "
-                   "pending=%lu pending_messages=%lu peak_pending=%lu total_queue_memory=%lu "
-                   "oldest_ms=%.1f sndbuf=%d "
-                   "kernel_outq=%d unacked=%d retrans_total=%d rtt_us=%d",
-                   tag, player->id, player->xd, player->yd, networkOutput.buffered, window,
-                   (unsigned long long)s.messages, (unsigned long long)s.requestedBytes,
-                   (unsigned long long)s.sendCalls, (unsigned long long)s.sentBytes,
-                   (unsigned long long)s.mxMessages, (unsigned long long)s.mxCells,
-                   (unsigned long long)s.mxPlainBytes, (unsigned long long)s.mxWireBytes,
-                   s.maxMXCells, (unsigned long long)s.wouldBlock,
-                   (unsigned long long)s.partialWrites, (unsigned long long)s.interrupts,
-                   (unsigned long)output.pending(), (unsigned long)output.pendingMessages(),
-                   (unsigned long)s.peakPendingBytes, (unsigned long)ServerSendBuffer::totalAllocated(),
-                   output.oldestAge( now ) * 1000, k.sendBuffer, k.outq,
-                   k.unacked, k.retransmits, k.rttUS );
-    }
-
-static void logNetworkWriteFailure( LiveObject *player, const char *reason ) {
-    const ServerSendBuffer &output = player->outgoing;
-    AppLog::infoF( "[NET_WRITE_ERROR] player=%d reason=%s type=%s requested=%d "
+    AppLog::infoF( "[NET_WRITE_ERROR] player=%d world=(%d,%d) reason=%s type=%s requested=%d "
                    "result=%d error=%d (%s) source=%s:%d",
-                   player->id, reason, output.lastType, output.lastRequested,
+                   player->id, player->xd, player->yd, reason, output.lastType, output.lastRequested,
                    output.lastSent, output.lastError,
                    ServerSocketWriter::errorName( output.lastError ),
                    output.lastFunction, output.lastLine );
-    logPlayerNetworkStats( player, "NET_WRITE_ERROR_STATS", Time::getCurrentTime() );
+    AppLog::infoF( "[NET_WRITE_ERROR_STATS] player=%d would_block=%llu partial=%llu interrupted=%llu "
+                   "pending=%lu pending_messages=%lu peak_pending=%lu total_queue_memory=%lu "
+                   "oldest_ms=%.1f sndbuf=%d "
+                   "kernel_outq=%d unacked=%d retrans_total=%d rtt_us=%d",
+                   player->id, (unsigned long long)s.wouldBlock,
+                   (unsigned long long)s.partialWrites, (unsigned long long)s.interrupts,
+                   (unsigned long)output.pending(), (unsigned long)output.pendingMessages(),
+                   (unsigned long)s.peakPendingBytes, (unsigned long)ServerSendBuffer::totalAllocated(),
+                   output.oldestAge( Time::getCurrentTime() ) * 1000, k.sendBuffer, k.outq,
+                   k.unacked, k.retransmits, k.rttUS );
     }
 
 
@@ -4357,9 +4332,6 @@ static void setPlayerDisconnected( LiveObject *inPlayer,
     AppLog::infoF( "Player %d (%s) marked as disconnected (%s) in func (%s:%d)",
                    inPlayer->id, inPlayer->email, inReason, func, line );
 
-    if( networkOutput.debug ) {
-        logPlayerNetworkStats( inPlayer, "NET_CLOSE", Time::getCurrentTime() );
-        }
     inPlayer->outgoing.reset();
 
     // 旁观者无重返价值:断连即标记 error+deleteSent,由 despawn 块本帧/下帧移除;
@@ -4425,7 +4397,7 @@ static void setPlayerDisconnected( LiveObject *inPlayer,
 
 
 
-// Return the bytes accepted by the transport. Buffered mode copies them before
+// Return the bytes accepted by the transport. The queue copies them before
 // callers release their temporary messages. FreshConnection handshakes keep
 // using their existing direct path; every established-player write goes here.
 static int sendPlayerData( LiveObject *player, unsigned char *data, int size,
@@ -4434,30 +4406,23 @@ static int sendPlayerData( LiveObject *player, unsigned char *data, int size,
     if( size < 0 || data == NULL || !player->connected || player->sock == NULL ) return -1;
     ServerSendBuffer &output = player->outgoing;
     double now = Time::getCurrentTime();
-    output.observeMessage( data, size, now, function, line );
+    output.setMessageContext( data, size, function, line );
     if( !output.socketPrepared ) {
         ServerSocketWriter::setNoDelay( player->sock );
         output.socketPrepared = true;
         }
-    // Drain an existing queue before reverting to direct mode on a live toggle.
-    if( networkOutput.buffered || output.pending() > 0 || output.failure != NULL ) {
-        if( output.enqueue( data, size, now, networkOutput.sendInterval, networkOutput.maxBytes, networkOutput.maxTotalBytes ) ) {
-            return size;
-            }
-        logNetworkWriteFailure( player, output.failure );
-        return -1;
+    if( output.enqueue( data, size, now, networkOutput.sendInterval,
+                        networkOutput.maxBytes, networkOutput.maxTotalBytes ) ) {
+        return size;
         }
-    ServerWriteResult result = ServerSocketWriter::send( player->sock, data, size );
-    output.observeWrite( result, size );
-    if( result.sent != size ) logNetworkWriteFailure( player, "Direct socket write incomplete" );
-    return result.sent;
+    logNetworkWriteFailure( player, output.failure );
+    return -1;
     }
 
 static void stepPlayerOutput( LiveObject *player, double now ) {
     if( !player->connected || player->sock == NULL ) return;
     ServerSendBuffer &output = player->outgoing;
-    double interval = networkOutput.buffered ? networkOutput.sendInterval : 0;
-    if( !output.drain( now, interval, networkOutput.maxAge, 65536,
+    if( !output.drain( now, networkOutput.sendInterval, networkOutput.maxAge, 65536,
                       [player]( const unsigned char *data, int size ) {
                           return ServerSocketWriter::send( player->sock, data, size );
                           } ) ) {
@@ -4465,12 +4430,6 @@ static void stepPlayerOutput( LiveObject *player, double now ) {
         logNetworkWriteFailure( player, reason );
         setPlayerDisconnected( player, reason, __func__, __LINE__ );
         return;
-        }
-    if( output.reportStart != 0 && now - output.reportStart >= networkOutput.reportInterval ) {
-        if( networkOutput.debug && (output.stats.messages > 0 || output.pending() > 0) ) {
-            logPlayerNetworkStats( player, "NET_WRITE", now );
-            }
-        output.restartReport( now );
         }
     }
 
@@ -4486,38 +4445,6 @@ static double networkOutputPollTimeout( double timeout ) {
             }
         }
     return timeout;
-    }
-
-struct MapUpdateStats {
-    double start = 0, maxStepMS = 0;
-    uint64_t steps = 0, changedCells = 0;
-    int maxChangedCells = 0;
-};
-static MapUpdateStats mapUpdateStats;
-
-static void recordMapUpdateStep( int cells, double milliseconds ) {
-    if( !networkOutput.debug ) {
-        mapUpdateStats = MapUpdateStats();
-        return;
-        }
-    double now = Time::getCurrentTime();
-    if( mapUpdateStats.start == 0 ) mapUpdateStats.start = now;
-    mapUpdateStats.steps++;
-    mapUpdateStats.changedCells += cells;
-    mapUpdateStats.maxChangedCells = (std::max)( cells, mapUpdateStats.maxChangedCells );
-    mapUpdateStats.maxStepMS = (std::max)( milliseconds, mapUpdateStats.maxStepMS );
-    if( now - mapUpdateStats.start >= networkOutput.reportInterval ) {
-        if( networkOutput.debug ) {
-            AppLog::infoF( "[MAP_UPDATE] window=%.3f steps=%llu changed_cells=%llu "
-                           "max_batch=%d map_step_max_ms=%.3f",
-                           now - mapUpdateStats.start,
-                           (unsigned long long)mapUpdateStats.steps,
-                           (unsigned long long)mapUpdateStats.changedCells,
-                           mapUpdateStats.maxChangedCells, mapUpdateStats.maxStepMS );
-            }
-        mapUpdateStats = MapUpdateStats();
-        mapUpdateStats.start = now;
-        }
     }
 
 // if inOnePlayerOnly set, we only send to that player
@@ -13426,6 +13353,7 @@ int main() {
 
     printf( "\n" );
     AppLog::info( "Server starting up" );
+    initNetworkOutputSettings();
 
     printf( "\n" );
     
@@ -13785,7 +13713,6 @@ int main() {
     while( !quit ) {
 
         double curStepTime = Time::getCurrentTime();
-        readNetworkOutputSettings( curStepTime );
         
         // flush past players hourly
         if( curStepTime - lastPastPlayerFlushTime > 3600 ) {
@@ -14233,10 +14160,8 @@ int main() {
         // handled
         
         pollTimeout = networkOutputPollTimeout( pollTimeout );
-        // Keep direct mode's original timing for diagnosis. Buffered mode
-        // rounds positive sub-ms deadlines up instead of spinning on wait(0).
-        int pollTimeoutMS = networkOutput.buffered ?
-            (int)ceil( pollTimeout * 1000 ) : (int)( pollTimeout * 1000 );
+        // Round positive sub-ms deadlines up instead of spinning on wait(0).
+        int pollTimeoutMS = (int)ceil( pollTimeout * 1000 );
         readySock = sockPoll.wait( pollTimeoutMS );
         
         
@@ -23549,10 +23474,7 @@ int main() {
 
         // add changes from auto-decays on map, 
         // mixed with player-caused changes
-        double mapStepStart = networkOutput.debug ? Time::getCurrentTime() : 0;
         stepMap( &mapChanges, &mapChangesPos );
-        recordMapUpdateStep( mapChanges.size(), networkOutput.debug ?
-                            (Time::getCurrentTime() - mapStepStart) * 1000 : 0 );
         
         
 
@@ -25068,8 +24990,6 @@ int main() {
                         
                         unsigned char *mapChangeMessage = NULL;
                         int mapChangeMessageLength = 0;
-                        int mapChangePlainLength = 0;
-                        int mapChangeCells = 0;
                         SimpleVector<char> mapChangeChars;
 
                         for( int u=0; u<mapChanges.size(); u++ ) {
@@ -25092,7 +25012,6 @@ int main() {
                                     nextPlayer->birthPos.y );
                             
                             mapChangeChars.appendElementString( lineString );
-                            mapChangeCells++;
                             delete [] lineString;
                             }
                         
@@ -25107,7 +25026,6 @@ int main() {
 
                             mapChangeMessageLength = 
                                 strlen( mapChangeMessageText );
-                            mapChangePlainLength = mapChangeMessageLength;
             
                             if( mapChangeMessageLength < 
                                 maxUncompressedSize ) {
@@ -25126,9 +25044,6 @@ int main() {
 
                         
                         if( mapChangeMessage != NULL ) {
-
-                            nextPlayer->outgoing.observeMX( mapChangeCells,
-                                mapChangePlainLength, mapChangeMessageLength );
 
                             int numSent = 
                                 sendPlayerData( nextPlayer, mapChangeMessage,

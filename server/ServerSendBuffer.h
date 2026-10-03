@@ -88,11 +88,9 @@ class ServerSocketWriter {
 };
 
 struct ServerSendStats {
-    uint64_t messages = 0, requestedBytes = 0, sendCalls = 0, sentBytes = 0;
+    // Connection-lifetime exception counts for failure logs only.
     uint64_t wouldBlock = 0, partialWrites = 0, interrupts = 0;
-    uint64_t mxMessages = 0, mxCells = 0, mxPlainBytes = 0, mxWireBytes = 0;
     size_t peakPendingBytes = 0;
-    int maxMXCells = 0;
 };
 
 // SimpleVector copies LiveObject during growth and tutorial transfers. Only the
@@ -181,7 +179,6 @@ class ServerSendBuffer {
 
     public:
         ServerSendStats stats;
-        double reportStart = 0;
         bool socketPrepared = false;
         int lastRequested = 0, lastSent = 0, lastError = 0;
         const char *lastFunction = "none";
@@ -197,7 +194,6 @@ class ServerSendBuffer {
             if( queue ) queue->releaseStorage();
             queue.reset(); // releases storage without allocating
             stats = ServerSendStats();
-            reportStart = 0;
             socketPrepared = false;
             lastRequested = lastSent = lastError = lastLine = 0;
             lastFunction = "none";
@@ -215,11 +211,8 @@ class ServerSendBuffer {
                 now - queue->messages[queue->firstMessage].time );
             }
 
-        void observeMessage( const unsigned char *data, int size, double now,
-                             const char *function, int line ) {
-            if( reportStart == 0 ) reportStart = now;
-            stats.messages++;
-            stats.requestedBytes += size;
+        void setMessageContext( const unsigned char *data, int size,
+                                const char *function, int line ) {
             lastRequested = size;
             lastFunction = function;
             lastLine = line;
@@ -228,24 +221,14 @@ class ServerSendBuffer {
             }
 
         void observeWrite( ServerWriteResult result, int requested ) {
-            stats.sendCalls++;
             lastSent = result.sent;
             lastError = result.error;
             lastRequested = requested;
             if( result.sent > 0 ) {
-                stats.sentBytes += result.sent;
                 if( result.sent < requested ) stats.partialWrites++;
                 }
             else if( result.sent == -2 ) stats.wouldBlock++;
             else if( ServerSocketWriter::interrupted( result.error ) ) stats.interrupts++;
-            }
-
-        void observeMX( int cells, int plainBytes, int wireBytes ) {
-            stats.mxMessages++;
-            stats.mxCells += cells;
-            stats.mxPlainBytes += plainBytes;
-            stats.mxWireBytes += wireBytes;
-            stats.maxMXCells = (std::max)( stats.maxMXCells, cells );
             }
 
         bool enqueue( const unsigned char *data, int size, double now,
@@ -330,12 +313,6 @@ class ServerSendBuffer {
                 compact();
                 }
             return true;
-            }
-
-        void restartReport( double now ) {
-            stats = ServerSendStats();
-            stats.peakPendingBytes = pending();
-            reportStart = now;
             }
 
     private:
