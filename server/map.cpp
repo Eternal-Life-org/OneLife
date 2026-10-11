@@ -5387,7 +5387,7 @@ int checkDecayObject( int inX, int inY, int inID ) {
                                         avoidFloor ) {
                                         int floorID = getMapFloor( testX, testY );
                                     
-                                        if( floorID > 0 ) {
+                                        if( floorID > 0 && strstr( getObject( floorID )->description, "groundLikeFloor" ) == NULL ) {
                                             blockedByFloor = true;
                                             }
                                         }
@@ -5546,7 +5546,7 @@ int checkDecayObject( int inX, int inY, int inID ) {
                             avoidFloor ) {
                             int floorID = getMapFloor( testX, testY );
                         
-                            if( floorID > 0 ) {
+                            if( floorID > 0 && strstr( getObject( floorID )->description, "groundLikeFloor" ) == NULL ) {
                                 blockedByFloor = true;
                                 }
                             }
@@ -5686,7 +5686,7 @@ int checkDecayObject( int inX, int inY, int inID ) {
                                         int floorID = 
                                             getMapFloor( testX, testY );
                         
-                                        if( floorID > 0 ) {
+                                        if( floorID > 0 && strstr( getObject( floorID )->description, "groundLikeFloor" ) == NULL ) {
                                             // blocked by floor
                                             continue;
                                             }
