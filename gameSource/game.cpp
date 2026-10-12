@@ -2113,9 +2113,12 @@ void drawFrame( char inUpdate ) {
                     if( progress == 1.0 ) {
                         initCategoryBankFinish();
                         printf( "Finished loading category bank in %f sec\n",
-                                Time::getCurrentTime() - 
+                                Time::getCurrentTime() -
                                 loadingPhaseStartTime );
                         loadingPhaseStartTime = Time::getCurrentTime();
+
+                        // 类别母物品 +标签 继承到子物品（详见 objectBank.cpp）
+                        applyCategoryTagInheritance();
 
                         char rebuilding;
                         

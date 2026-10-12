@@ -22,6 +22,8 @@
 
 #include "animationBank.h"
 
+#include "categoryBank.h"
+
 
 static int mapSize;
 // maps IDs to records
@@ -754,6 +756,172 @@ static void setupDefaultObject( ObjectRecord *inR ) {
     if( strstr( inR->description, "+default" ) ) {
         defaultObjectID = inR->id;
         }
+    }
+
+
+
+
+// 类别母物品 +标签 向子物品的全面继承
+// 在类别库加载完成后调用一次（objectBank 必须已加载完）。
+// 把子物品所属各母物品 description 中的标签 token 追加进子物品的
+// 内存 description，然后重跑字段解析，使所有 strstr 类标签消费点
+// （+drug/+cont/+yum/+useOnContained 等）无需改动即获得继承能力。
+// 规则：
+//  - 只追加 '+字母' 开头的 token 和 'maxPickupAge_数字'，
+//    绝不拼接母物品原文，避免误触发非 + 前缀的描述扫描
+//    （emot_/food_/origGrave/modTool 等）；
+//  - 排除 +default（全局单例标记，继承会互相顶掉）；
+//  - 优先级：子物品自身 > 先加载的类别母物品 > 后加载的
+//    （token 已存在则跳过，strstr/sscanf 取串中第一个命中）；
+//  - 只继承一级（读母物品的原始 description，不级联）；
+//  - 不重跑写全局状态的解析（setupDefaultObject/speechPipe/globalTrigger）。
+void applyCategoryTagInheritance() {
+
+    int numObjects;
+    ObjectRecord **objects = getAllObjects( &numObjects );
+
+    int numChanged = 0;
+
+    for( int i=0; i<numObjects; i++ ) {
+        ObjectRecord *o = objects[i];
+
+        ReverseCategoryRecord *rev = getReverseCategory( o->id );
+
+        if( rev == NULL ) {
+            continue;
+            }
+
+        SimpleVector<char> merged;
+        merged.appendElementString( o->description );
+
+        int numAppended = 0;
+
+        for( int c=0; c<rev->categoryIDSet.size(); c++ ) {
+
+            CategoryRecord *cat =
+                getCategory( rev->categoryIDSet.getElementDirect( c ) );
+
+            if( cat == NULL ) {
+                continue;
+                }
+
+            ObjectRecord *parent = getObject( cat->parentID );
+
+            if( parent == NULL || parent->description == NULL ) {
+                continue;
+                }
+
+            // tokenize a copy of the parent description on whitespace
+            char *parentDescCopy = stringDuplicate( parent->description );
+
+            char *scan = parentDescCopy;
+
+            while( *scan != '\0' ) {
+
+                // skip whitespace
+                while( *scan == ' ' || *scan == '\t' ||
+                       *scan == '\r' || *scan == '\n' ) {
+                    scan ++;
+                    }
+                if( *scan == '\0' ) {
+                    break;
+                    }
+
+                char *tokenStart = scan;
+
+                while( *scan != '\0' && *scan != ' ' && *scan != '\t' &&
+                       *scan != '\r' && *scan != '\n' ) {
+                    scan ++;
+                    }
+
+                int tokenLen = (int)( scan - tokenStart );
+
+                // strip trailing # (same convention as +cont parsing)
+                while( tokenLen > 0 && tokenStart[ tokenLen - 1 ] == '#' ) {
+                    tokenLen --;
+                    }
+
+                if( tokenLen < 2 ) {
+                    continue;
+                    }
+
+                char qualifies = false;
+
+                if( tokenStart[0] == '+' &&
+                    ( ( tokenStart[1] >= 'a' && tokenStart[1] <= 'z' ) ||
+                      ( tokenStart[1] >= 'A' && tokenStart[1] <= 'Z' ) ) ) {
+
+                    qualifies = true;
+
+                    if( tokenLen >= 8 &&
+                        strncmp( tokenStart, "+default", 8 ) == 0 ) {
+                        // global singleton marker, not inheritable
+                        qualifies = false;
+                        }
+                    }
+                else if( tokenLen > 13 &&
+                         strncmp( tokenStart, "maxPickupAge_", 13 ) == 0 &&
+                         tokenStart[13] >= '0' && tokenStart[13] <= '9' ) {
+                    qualifies = true;
+                    }
+
+                if( !qualifies ) {
+                    continue;
+                    }
+
+                // already present?  substring check is conservative:
+                // a longer tag already in the string suppresses a shorter
+                // matching token, letting the earlier one win
+                char savedChar = tokenStart[ tokenLen ];
+                tokenStart[ tokenLen ] = '\0';
+
+                merged.push_back( '\0' );
+                char alreadyThere =
+                    ( strstr( merged.getElement( 0 ), tokenStart ) != NULL );
+                merged.deleteElement( merged.size() - 1 );
+
+                if( !alreadyThere ) {
+                    merged.push_back( ' ' );
+                    merged.appendElementString( tokenStart );
+                    numAppended ++;
+                    }
+
+                tokenStart[ tokenLen ] = savedChar;
+                }
+
+            delete [] parentDescCopy;
+            }
+
+        if( numAppended > 0 ) {
+
+            delete [] o->description;
+            o->description = merged.getElementString();
+
+            // re-parse derived fields from the merged description
+            setupObjectPasswordStatus( o );
+            setupFlight( o );
+            setupOwned( o );
+            setupNoHighlight( o );
+            setupNoClickThrough( o );
+            setupMaxPickupAge( o );
+            setupAutoDefaultTrans( o );
+            setupNoBackAccess( o );
+            setupBlocksMoving( o );
+            setupAlcohol( o );
+            setupWall( o );
+
+            if( ! o->isTapOutTrigger ) {
+                setupTapout( o );
+                }
+
+            numChanged ++;
+            }
+        }
+
+    delete [] objects;
+
+    printf( "Category tag inheritance applied to %d objects\n",
+            numChanged );
     }
 
 

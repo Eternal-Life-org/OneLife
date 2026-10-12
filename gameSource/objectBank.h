@@ -529,6 +529,13 @@ float initObjectBankStep();
 void initObjectBankFinish();
 
 
+// 类别母物品 +标签 向子物品全面继承：
+// 在 initCategoryBankFinish 之后、进入游戏逻辑之前调用一次
+// （仅服务端与客户端；编辑器不调用，避免合并文本经编辑器写回磁盘）。
+// 详见 objectBank.cpp 中的实现说明。
+void applyCategoryTagInheritance();
+
+
 void setTrippingColor( double x, double y );
 
 

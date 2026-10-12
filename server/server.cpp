@@ -13568,6 +13568,9 @@ int main() {
     while( initCategoryBankStep() < 1.0 );
     initCategoryBankFinish();
 
+    // 类别母物品 +标签 继承到子物品（详见 objectBank.cpp）
+    applyCategoryTagInheritance();
+
 
     // auto-generate category-based transitions
     initTransBankStart( &rebuilding, true, true, true, true );
