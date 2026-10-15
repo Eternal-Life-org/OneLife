@@ -761,6 +761,166 @@ static void setupDefaultObject( ObjectRecord *inR ) {
 
 
 
+// +tag 后缀显示功能（2026-10-15）：
+// 收集一段描述里所有 +tag 前缀 token 的文字（去掉 +tag 前缀，去尾部 #）
+typedef struct TagSuffixEntry {
+        int sourceID;   // 0 = 物品自身，否则为类别母物品 ID
+        char *text;
+} TagSuffixEntry;
+
+
+static void collectTagSuffixTokens( const char *inDescription,
+                                    int inSourceID,
+                                    SimpleVector<TagSuffixEntry> *inList ) {
+    if( inDescription == NULL ) {
+        return;
+        }
+
+    char *copy = stringDuplicate( inDescription );
+
+    char *scan = copy;
+
+    while( *scan != '\0' ) {
+
+        while( *scan == ' ' || *scan == '\t' ||
+               *scan == '\r' || *scan == '\n' ) {
+            scan ++;
+            }
+        if( *scan == '\0' ) {
+            break;
+            }
+
+        char *tokenStart = scan;
+
+        while( *scan != '\0' && *scan != ' ' && *scan != '\t' &&
+               *scan != '\r' && *scan != '\n' ) {
+            scan ++;
+            }
+
+        int tokenLen = (int)( scan - tokenStart );
+
+        while( tokenLen > 0 && tokenStart[ tokenLen - 1 ] == '#' ) {
+            tokenLen --;
+            }
+
+        if( tokenLen > 4 &&
+            strncmp( tokenStart, "+tag", 4 ) == 0 ) {
+
+            char savedChar = tokenStart[ tokenLen ];
+            tokenStart[ tokenLen ] = '\0';
+
+            TagSuffixEntry e = { inSourceID,
+                                 stringDuplicate( tokenStart + 4 ) };
+            inList->push_back( e );
+
+            tokenStart[ tokenLen ] = savedChar;
+            }
+        }
+
+    delete [] copy;
+    }
+
+
+// 拼接物品的 +tag 后缀显示串，规则见 objectBank.h 声明处
+char *composeCategoryTagSuffix( int inID, const char *inOwnDescription ) {
+
+    ObjectRecord *o = getObject( inID );
+
+    if( o == NULL ) {
+        return NULL;
+        }
+
+    SimpleVector<TagSuffixEntry> entries;
+
+    if( inOwnDescription != NULL ) {
+        collectTagSuffixTokens( inOwnDescription, 0, &entries );
+        }
+    else {
+        collectTagSuffixTokens( o->description, 0, &entries );
+        }
+
+    ReverseCategoryRecord *rev = getReverseCategory( inID );
+
+    if( rev != NULL ) {
+        for( int c=0; c<rev->categoryIDSet.size(); c++ ) {
+
+            CategoryRecord *cat =
+                getCategory( rev->categoryIDSet.getElementDirect( c ) );
+
+            if( cat == NULL ) {
+                continue;
+                }
+
+            ObjectRecord *parent = getObject( cat->parentID );
+
+            if( parent == NULL ) {
+                continue;
+                }
+
+            collectTagSuffixTokens( parent->description, parent->id, &entries );
+            }
+        }
+
+    if( entries.size() == 0 ) {
+        return NULL;
+        }
+
+    // 稳定排序：sourceID 升序（自身=0 最前，类别按母物品 ID 升序），
+    // 等值保持收集顺序（=描述书写顺序）。条目极少，插入排序即可
+    for( int i=1; i<entries.size(); i++ ) {
+        TagSuffixEntry e = entries.getElementDirect( i );
+        int j = i - 1;
+        while( j >= 0 &&
+               entries.getElement( j )->sourceID > e.sourceID ) {
+            *( entries.getElement( j + 1 ) ) = *( entries.getElement( j ) );
+            j --;
+            }
+        *( entries.getElement( j + 1 ) ) = e;
+        }
+
+    // 拼接（同名文字只保留第一个，自身优先）
+    SimpleVector<char> merged;
+    SimpleVector<char*> keptTexts;
+
+    char *result = NULL;
+
+    for( int i=0; i<entries.size(); i++ ) {
+        TagSuffixEntry e = entries.getElementDirect( i );
+
+        char alreadyThere = false;
+        for( int k=0; k<keptTexts.size(); k++ ) {
+            if( strcmp( keptTexts.getElementDirect( k ), e.text ) == 0 ) {
+                alreadyThere = true;
+                break;
+                }
+            }
+
+        if( !alreadyThere ) {
+            if( merged.size() > 0 ) {
+                merged.push_back( ' ' );
+                }
+            merged.appendElementString( e.text );
+            keptTexts.push_back( e.text );
+            e.text = NULL;  // 所有权转移进 keptTexts
+            }
+
+        if( e.text != NULL ) {
+            delete [] e.text;
+            e.text = NULL;
+            }
+        }
+
+    if( merged.size() > 0 ) {
+        result = merged.getElementString();
+        }
+
+    keptTexts.deallocateStringElements();
+
+    return result;
+    }
+
+
+
 // 类别母物品 +标签 向子物品的全面继承
 // 在类别库加载完成后调用一次（objectBank 必须已加载完）。
 // 把子物品所属各母物品 description 中的标签 token 追加进子物品的
@@ -784,6 +944,9 @@ void applyCategoryTagInheritance() {
 
     for( int i=0; i<numObjects; i++ ) {
         ObjectRecord *o = objects[i];
+
+        // 先用合并前的原始描述生成 +tag 后缀显示串
+        o->categoryTagSuffix = composeCategoryTagSuffix( o->id, o->description );
 
         ReverseCategoryRecord *rev = getReverseCategory( o->id );
 
@@ -898,6 +1061,7 @@ void applyCategoryTagInheritance() {
             o->description = merged.getElementString();
 
             // re-parse derived fields from the merged description
+            setupObjectWritingStatus( o );
             setupObjectPasswordStatus( o );
             setupFlight( o );
             setupOwned( o );
@@ -973,7 +1137,7 @@ float initObjectBankStep() {
                 next++;
                             
                 r->description = stringDuplicate( lines[next] );
-                         
+                r->categoryTagSuffix = NULL;               
 
                 setupObjectWritingStatus( r );
                 
@@ -3771,6 +3935,7 @@ int addObject( const char *inDescription,
     
     r->id = newID;
     r->description = stringDuplicate( inDescription );
+    r->categoryTagSuffix = NULL;
 
     r->containable = inContainable;
     r->containSize = inContainSize;

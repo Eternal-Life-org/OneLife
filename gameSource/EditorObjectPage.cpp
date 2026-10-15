@@ -269,7 +269,9 @@ EditorObjectPage::EditorObjectPage()
 
     mSetContainOffset = false;
     mContainerDemoObject = -1;
-    
+
+    mTagSuffixPreview = NULL;
+
     mDescriptionField.usePasteShortcut( true );
 
     addComponent( &mDescriptionField );
@@ -813,6 +815,10 @@ EditorObjectPage::EditorObjectPage()
 
 
 EditorObjectPage::~EditorObjectPage() {
+
+    if( mTagSuffixPreview != NULL ) {
+        delete [] mTagSuffixPreview;
+        }
 
     if( isSpellCheckReady() ) {
         freeSpellCheck();
@@ -1509,11 +1515,13 @@ void EditorObjectPage::actionPerformed( GUIComponent *inTarget ) {
             ( strcmp( text, "" ) != 0 ) );
         
         mReplaceObjectButton.setVisible(
-            mSaveObjectButton.isVisible() 
+            mSaveObjectButton.isVisible()
             &&
             mCurrentObject.id != -1 );
 
         delete [] text;
+
+        updateTagSuffixPreview();
         }
     else if( inTarget == &mBiomeField ) {
         fixCommaIntList( &mBiomeField );
@@ -1863,6 +1871,8 @@ void EditorObjectPage::actionPerformed( GUIComponent *inTarget ) {
 
         delete [] mCurrentObject.description;
         mCurrentObject.description = mDescriptionField.getText();
+
+        updateTagSuffixPreview();
         
         
         mPersonAgeSlider.setVisible( false );
@@ -3137,8 +3147,10 @@ void EditorObjectPage::actionPerformed( GUIComponent *inTarget ) {
             mObjectLayerSwaps.deleteAll();
 
             mCurrentObject.id = objectID;
-                
+
             mDescriptionField.setText( pickedRecord->description );
+
+            updateTagSuffixPreview();
 
             mMapChanceField.setFloat( pickedRecord->mapChance, 4 );
             
@@ -5236,7 +5248,19 @@ void EditorObjectPage::draw( doublePair inViewCenter,
         smallFont->drawString( idString, pos, alignLeft );
         delete [] idString;
         }
-    
+
+    // 类别 +tag 后缀浅蓝预览行（描述框正下方）
+    if( mTagSuffixPreview != NULL ) {
+        doublePair pos = mDescriptionField.getPosition();
+
+        pos.x -= 157;
+        pos.y -= 19;
+
+        setDrawColor( 0.45, 0.75, 1.0, 1.0 );
+
+        smallFont->drawString( mTagSuffixPreview, pos, alignLeft );
+        }
+
 
 
 
@@ -5246,6 +5270,37 @@ void EditorObjectPage::draw( doublePair inViewCenter,
     pos.y = -290;
     
     drawZoomView( zoomPos, 16, 4, pos );
+    }
+
+
+
+// 类别 +tag 后缀预览：自身（描述框当前文字）在前，类别母物品的
+// 按母物品 ID 升序跟在后面，实时重算（规则见 objectBank.h）
+void EditorObjectPage::updateTagSuffixPreview() {
+
+    if( mTagSuffixPreview != NULL ) {
+        delete [] mTagSuffixPreview;
+        mTagSuffixPreview = NULL;
+        }
+
+    if( mCurrentObject.id <= 0 ) {
+        return;
+        }
+
+    char *ownText = mDescriptionField.getText();
+
+    char *composed =
+        composeCategoryTagSuffix( mCurrentObject.id, ownText );
+
+    delete [] ownText;
+
+    if( composed == NULL ) {
+        return;
+        }
+
+    mTagSuffixPreview = autoSprintf( "后缀: %s", composed );
+
+    delete [] composed;
     }
 
 

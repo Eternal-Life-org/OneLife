@@ -42,8 +42,14 @@ typedef struct TapoutRecord {
 
 typedef struct ObjectRecord {
         int id;
-        
+
         char *description;
+
+        // 类别 +tag 后缀显示串（自身 + 所属类别母物品的 +tagXXX 内容，
+        // 排序去重后用空格拼接），由 applyCategoryTagInheritance() 在
+        // 加载后填充；编辑器不跑继承，保持 NULL（编辑器用
+        // composeCategoryTagSuffix 实时计算）。仅用于显示，从不写盘。
+        char *categoryTagSuffix;
 
         // can it go into a container
         char containable;
@@ -534,6 +540,13 @@ void initObjectBankFinish();
 // （仅服务端与客户端；编辑器不调用，避免合并文本经编辑器写回磁盘）。
 // 详见 objectBank.cpp 中的实现说明。
 void applyCategoryTagInheritance();
+
+// 拼接物品的 +tag 后缀显示串：自身的 +tagXXX 在前，所属类别母物品的
+// 按母物品 ID 升序跟在后面（同源按描述书写顺序），同名只保留第一个，
+// 用空格连接。inOwnDescription 非 NULL 时用它代替物品当前 description
+// （编辑器实时预览用）。返回新分配的串（调用方负责释放），
+// 没有 +tag 时返回 NULL。
+char *composeCategoryTagSuffix( int inID, const char *inOwnDescription );
 
 
 void setTrippingColor( double x, double y );

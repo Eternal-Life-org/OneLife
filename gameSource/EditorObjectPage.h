@@ -53,7 +53,10 @@ class EditorObjectPage : public GamePage, public ActionListener {
             }
 
         void clearUseOfSprite( int inSpriteID );
-        
+
+        // 类别 +tag 后缀预览：根据描述框当前文字 + 类别母物品实时拼接
+        void updateTagSuffixPreview();
+
         
         virtual void actionPerformed( GUIComponent *inTarget );
         
@@ -78,7 +81,10 @@ class EditorObjectPage : public GamePage, public ActionListener {
         doublePair mObjectCenterOnScreen;
         
         TextField mDescriptionField;
-        
+
+        // 描述框下方的浅蓝只读预览行内容（"后缀: xxx yyy"），NULL = 无
+        char *mTagSuffixPreview;
+
         TextField mBiomeField;
         TextField mMapChanceField;
         TextField mHeatValueField;

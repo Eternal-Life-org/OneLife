@@ -2317,7 +2317,7 @@ static void stripDescriptionComment( char *inString ) {
     // pound sign is used for trailing developer comments
     // that aren't show to end user, cut them off if they exist
     char *firstPound = strstr( inString, "#" );
-            
+
     if( firstPound != NULL ) {
         if( firstPound[-1] == ' ' ) {
             firstPound[-1] = '\0';
@@ -2326,6 +2326,88 @@ static void stripDescriptionComment( char *inString ) {
             firstPound[0] = '\0';
             }
         }
+    }
+
+
+
+// 显示规则（+tag 后缀功能，2026-10-15）：
+//  - 剥离机制 token（+xxx / maxPickupAge_N）——类别继承会把母物品的
+//    机制标签合并进子物品描述，不能让它们以原文出现在显示名里
+//  - 保留 # 后缀（连带显示给玩家）；inReplacePound 时把 # 换成空格
+//    （提示单内部用 # 做行分隔符，名字里的 # 必须让位）
+//  - 描述含 # 且物品有类别 +tag 后缀时，把后缀文字追加到末尾
+//    （普通颜色，与 # 后缀一致；编辑器里的浅蓝预览在 EditorObjectPage）
+// inCopy 必须是可释放的副本；返回值可能指向新串（旧串已被释放）
+static char *applyDescriptionDisplayRules( char *inCopy, int inID,
+                                           char inReplacePound ) {
+    if( inCopy == NULL ) {
+        return NULL;
+        }
+
+    // 原地重建：去掉机制 token，压缩多余空白
+    char *read = inCopy;
+    char *write = inCopy;
+
+    while( *read != '\0' ) {
+
+        while( *read == ' ' || *read == '\t' ) {
+            read ++;
+            }
+        if( *read == '\0' ) {
+            break;
+            }
+
+        char *tokenStart = read;
+
+        while( *read != '\0' && *read != ' ' && *read != '\t' ) {
+            read ++;
+            }
+
+        int tokenLen = (int)( read - tokenStart );
+
+        char isMechToken = false;
+
+        if( tokenStart[0] == '+' ) {
+            isMechToken = true;
+            }
+        else if( tokenLen > 13 &&
+                 strncmp( tokenStart, "maxPickupAge_", 13 ) == 0 ) {
+            isMechToken = true;
+            }
+
+        if( isMechToken ) {
+            continue;
+            }
+
+        if( write != inCopy ) {
+            *write = ' ';
+            write ++;
+            }
+
+        memmove( write, tokenStart, tokenLen );
+        write += tokenLen;
+        }
+    *write = '\0';
+
+    if( strstr( inCopy, "#" ) != NULL ) {
+        ObjectRecord *o = getObject( inID, true );
+
+        if( o != NULL && o->categoryTagSuffix != NULL ) {
+            char *old = inCopy;
+            inCopy = autoSprintf( "%s %s", inCopy, o->categoryTagSuffix );
+            delete [] old;
+            }
+        }
+
+    if( inReplacePound ) {
+        for( char *p = inCopy; *p != '\0'; p++ ) {
+            if( *p == '#' ) {
+                *p = ' ';
+                }
+            }
+        }
+
+    return inCopy;
     }
 
 
@@ -2343,8 +2425,7 @@ static char *getDisplayObjectDescription( int inID ) {
     if(desc == NULL) {
         return NULL;
         }
-    stripDescriptionComment( desc );
-    return desc;
+    return applyDescriptionDisplayRules( desc, inID, false );
     }
 
 std::string LivingLifePage::minitechGetFullObjectDescription( int objID ) {
@@ -14178,9 +14259,11 @@ int LivingLifePage::getNumHints( int inObjectID ) {
             
         if( tr->actor > 0 && tr->actor != inObjectID ) {
             ObjectRecord *otherObj = getObject( tr->actor );
-                
-            char *trimmedDesc = stringDuplicate( otherObj->description );
-            stripDescriptionComment( trimmedDesc );
+
+            char *trimmedDesc =
+                applyDescriptionDisplayRules(
+                    stringDuplicate( otherObj->description ),
+                    otherObj->id, true );
 
             for( int s=0; s<otherActorStrings.size(); s++ ) {
                     
@@ -14203,9 +14286,11 @@ int LivingLifePage::getNumHints( int inObjectID ) {
             
         if( tr->target > 0 && tr->target != inObjectID ) {
             ObjectRecord *otherObj = getObject( tr->target );
-                
-            char *trimmedDesc = stringDuplicate( otherObj->description );
-            stripDescriptionComment( trimmedDesc );
+
+            char *trimmedDesc =
+                applyDescriptionDisplayRules(
+                    stringDuplicate( otherObj->description ),
+                    otherObj->id, true );
 
             for( int s=0; s<otherTargetStrings.size(); s++ ) {
                     
@@ -14333,7 +14418,8 @@ char *LivingLifePage::getHintMessage( int inObjectID, int inIndex ) {
             ObjectRecord *actorO = getObject( actor );
 
             actorString = stringToUpperCase( actorO->description );
-            stripDescriptionComment( actorString );
+            actorString = applyDescriptionDisplayRules( actorString,
+                                                        actor, true );
 
             if( found->actorMinUseFraction == 1.0 &&
                 actorO->numUses > 1 ) {
@@ -14362,9 +14448,10 @@ char *LivingLifePage::getHintMessage( int inObjectID, int inIndex ) {
         if( target > 0 ) {
             ObjectRecord *targetO = getObject( target );
 
-            targetString = 
+            targetString =
                 stringToUpperCase( targetO->description );
-            stripDescriptionComment( targetString );
+            targetString = applyDescriptionDisplayRules( targetString,
+                                                         target, true );
             
             if( found->targetMinUseFraction == 1.0 &&
                 targetO->numUses > 1 ) {
@@ -14421,8 +14508,11 @@ char *LivingLifePage::getHintMessage( int inObjectID, int inIndex ) {
         else {
             resultString = stringDuplicate( translate( "nothingHint" ) );
             }
-        
-        stripDescriptionComment( resultString );
+
+        if( result > 0 ) {
+            resultString = applyDescriptionDisplayRules( resultString,
+                                                         result, true );
+            }
         
         if( eventually ) {
             char *old = resultString;
