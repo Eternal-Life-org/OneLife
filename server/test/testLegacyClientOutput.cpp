@@ -1,4 +1,5 @@
 #include "../ServerSendBuffer.h"
+#include "../loginFailure.h"
 #include "minorGems/util/SimpleVector.h"
 #include "minorGems/util/stringUtils.h"
 #include "minorGems/formats/encodingUtils.h"
@@ -97,5 +98,21 @@ int main() {
             assert( serverFrameMessages.size() == 0 && !serverFrameReady );
             }
         }
-    puts( "Existing OneLife client parser: CM/MC/MX/FM passed with 1-byte, 7-byte and merged input" );
+    // A released client sees the original REJECTED type and ignores ERR1.
+    waitForFrameMessages = false;
+    char rejectFrame[64];
+    int rejectLength = formatLoginReject( LoginRejectReason::AuthBlocked,
+                                          rejectFrame, sizeof rejectFrame );
+    assert( rejectLength > 0 );
+    for( int i=0; i<rejectLength; i++ ) {
+        serverSocketBuffer.push_back( rejectFrame[i] );
+        char *message = getNextServerMessage();
+        if( i + 1 == rejectLength ) {
+            assert( message != NULL && getMessageType( message ) == REJECTED );
+            assert( strcmp( message, "REJECTED\nERR1 AUTH_BLOCKED\n" ) == 0 );
+        }
+        else assert( message == NULL );
+        delete [] message;
+    }
+    puts( "Existing OneLife client parser: CM/MC/MX/FM and ERR1 rejection passed" );
     }

@@ -17,6 +17,8 @@
 #include "minorGems/network/SocketServer.h"
 #include "minorGems/network/SocketPoll.h"
 #include "ServerSendBuffer.h"
+#include "loginFailure.h"
+#include "ticketAuthRequests.h"
 #include "minorGems/network/web/WebRequest.h"
 #include "minorGems/network/web/URLUtils.h"
 
@@ -525,8 +527,11 @@ typedef struct FreshConnection {
         
         char error;
         const char *errorCauseString;
+        LoginRejectReason loginRejectReason;
+        char loginAccepted;
         
         double rejectedSendTime;
+        LoginRejectSend rejectSend;
 
         char shutdownMode;
 
@@ -553,6 +558,13 @@ typedef struct FreshConnection {
 
         int mMapD;
     } FreshConnection;
+
+static void setLoginRejectReason( FreshConnection *connection,
+                                  LoginRejectReason reason ) {
+    if( connection->loginRejectReason == LoginRejectReason::None ) {
+        connection->loginRejectReason = reason;
+    }
+}
 
 
 SimpleVector<FreshConnection> newConnections;
@@ -1734,7 +1746,8 @@ static void deleteMembers( FreshConnection *inConnection ) {
         }
     
     if( inConnection->ticketServerRequest != NULL ) {
-        delete inConnection->ticketServerRequest;
+        TicketAuthRequests::retire( inConnection->ticketServerRequest );
+        inConnection->ticketServerRequest = NULL;
         }
     
     if( inConnection->email != NULL ) {
@@ -2092,7 +2105,8 @@ int numConnections = 0;
 
 // reads all waiting data from socket and stores it in buffer
 // returns true if socket still good, false on error
-char readSocketFull( Socket *inSock, SimpleVector<char> *inBuffer ) {
+char readSocketFull( Socket *inSock, SimpleVector<char> *inBuffer,
+                     int maxBytes = -1 ) {
 
     char buffer[512];
     
@@ -2131,6 +2145,11 @@ char readSocketFull( Socket *inSock, SimpleVector<char> *inBuffer ) {
         }
     
     while( numRead > 0 ) {
+        if( maxBytes >= 0 &&
+            ( inBuffer->size() > maxBytes ||
+              numRead > maxBytes - inBuffer->size() ) ) {
+            return false;
+        }
         inBuffer->appendArray( buffer, numRead );
 
         numRead = inSock->receive( (unsigned char*)buffer, 512, 0 );
@@ -8935,12 +8954,16 @@ int processLoggedInPlayer( char inAllowReconnect,
               players.size(),
               newObject.parentChainLength, seed);
     
-    HostAddress* a = connection->sock->getRemoteHostAddress(); 
+    HostAddress *a = connection->sock->getRemoteHostAddress();
     AppLog::infoF( "New player %s connected as player %d (tutorial=%d, IP=%s, Seed=%s) (%d,%d)"
                    " (maxPlacementX=%d)",
                    newObject.email, newObject.id,
-                   inTutorialNumber, a->mAddressString, seed, newObject.xs, newObject.ys,
+                   inTutorialNumber,
+                   a != NULL && a->mAddressString != NULL ?
+                       a->mAddressString : "unknown",
+                   seed, newObject.xs, newObject.ys,
                    maxPlacementX );
+    delete a;
     
     return newObject.id;
     }
@@ -8965,11 +8988,7 @@ static int processLiveViewSpectator( Socket *inSock,
     LiveObject *target = getLiveObject( inLiveViewTargetID );
     if( target == NULL || target->error || target->vogMode ||
         ! target->streaming ) {
-        AppLog::infoF( "LVO: LVOLOGIN target=%d invalid "
-                       "(missing/error/vog/!streaming), rejected",
-                       inLiveViewTargetID );
-        const char *rej = "REJECTED\n#";
-        inSock->send( (unsigned char*)rej, strlen( rej ), false, false );
+        // The caller retains the fresh connection and queues LIVE_UNAVAILABLE.
         return -1;
         }
 
@@ -9039,8 +9058,10 @@ static int processLiveViewSpectator( Socket *inSock,
     HostAddress *a = inSock->getRemoteHostAddress();
     AppLog::infoF( "LVO: spectator %s connected as player %d "
                    "(liveView target=%d, IP:%s) — no world body, no slot",
-                   newObject.email, newObject.id, target->id,
-                   a->mAddressString );
+                   newObject.email, newObject.id, newObject.liveViewTargetID,
+                   a != NULL && a->mAddressString != NULL ?
+                       a->mAddressString : "unknown" );
+    delete a;
 
     return newObject.id;
     }
@@ -9194,6 +9215,8 @@ static void processWaitingTwinConnection( FreshConnection inConnection ) {
                         nextConnectionToReject->error = true;
                         nextConnectionToReject->errorCauseString =
                             "Target family is not found or does not have fertiles";
+                        setLoginRejectReason( nextConnectionToReject,
+                            LoginRejectReason::FamilyUnavailable );
                             
                         if( nextConnectionToReject->twinCode != NULL ) {
                             delete [] nextConnectionToReject->twinCode;
@@ -14297,7 +14320,10 @@ int main() {
                 
                 newConnection.error = false;
                 newConnection.errorCauseString = "";
+                newConnection.loginRejectReason = LoginRejectReason::None;
+                newConnection.loginAccepted = false;
                 newConnection.rejectedSendTime = 0;
+                newConnection.rejectSend.reset();
                 newConnection.playerListSent = false;
                 newConnection.liveStreamSent = false;
                 int messageLength = strlen( message );
@@ -14413,54 +14439,79 @@ int main() {
                     nextConnection->error = true;
                     nextConnection->errorCauseString =
                         "Ticket server failed";
+                    setLoginRejectReason( nextConnection,
+                        LoginRejectReason::AuthServiceUnavailable );
+                    TicketAuthRequests::retire(
+                        nextConnection->ticketServerRequest );
+                    nextConnection->ticketServerRequest = NULL;
                     }
                 else if( result == 1 ) {
-                    // done, have result
+                    int bodyLength = 0;
+                    unsigned char *body =
+                        nextConnection->ticketServerRequest->getResult(
+                            &bodyLength );
+                    TicketCheckResult ticketResult = parseTicketCheckResult(
+                        nextConnection->ticketServerRequest->getHTTPStatusCode(),
+                        body, bodyLength );
+                    delete [] body;
 
-                    char *webResult = 
-                        nextConnection->ticketServerRequest->getResult();
-                    
-                    if( strstr( webResult, "INVALID" ) != NULL ) {
+                    if( ticketResult == TicketCheckResult::Invalid ||
+                        ticketResult == TicketCheckResult::Blocked ) {
                         AppLog::info( 
                             "Client key hmac rejected by ticket server, "
                             "client rejected." );
                         nextConnection->error = true;
                         nextConnection->errorCauseString =
                             "Client key check failed";
+                        setLoginRejectReason( nextConnection,
+                            ticketResult == TicketCheckResult::Blocked ?
+                            LoginRejectReason::AuthBlocked :
+                            LoginRejectReason::AuthInvalid );
+                        TicketAuthRequests::finish(
+                            nextConnection->ticketServerRequest );
+                        nextConnection->ticketServerRequest = NULL;
                         }
-                    else if( strstr( webResult, "VALID" ) != NULL ) {
-                        // correct!
+                    else if( ticketResult == TicketCheckResult::Valid ) {
                         nextConnection->ticketServerAccepted = true;
-						// whiteList检查
-						SimpleVector<char *> *whiteListsettings = SettingsManager::getSetting("whiteList");
-						bool isInWhiteList = false;
-                        // 遍历数组
-                        for (int i = 0; i < whiteListsettings->size(); i++) {
-                            char *value = whiteListsettings->getElementDirect(i);
-							if (i == 0 && strcmp("*", value) == 0) {
-                                isInWhiteList = true;
+
+                        SimpleVector<char *> *whiteList =
+                            SettingsManager::getSetting( "whiteList" );
+                        int whiteCount = whiteList == NULL ? 0 : whiteList->size();
+                        bool allowedByWhiteList = whiteCount == 0;
+                        for( int w=0; w<whiteCount; w++ ) {
+                            char *value = whiteList->getElementDirect( w );
+                            if( value != NULL &&
+                                ( ( w == 0 && strcmp( "*", value ) == 0 ) ||
+                                  strcmp( nextConnection->email, value ) == 0 ) ) {
+                                allowedByWhiteList = true;
                                 break;
-                            } else if (strcmp(nextConnection->email, value) == 0) {
-                                isInWhiteList = true;
-                                break;
+                                }
                             }
-                        }
-						if (!isInWhiteList && whiteListsettings->size() > 0) {
-                            AppLog::info("Email not in whitelist, client rejected.");
+                        if( whiteList != NULL ) {
+                            whiteList->deallocateStringElements();
+                            delete whiteList;
+                            }
+                        if( !allowedByWhiteList ) {
+                            AppLog::info( "Email not in whitelist, client rejected." );
                             nextConnection->error = true;
                             nextConnection->errorCauseString = "Email not in whitelist";
+                            setLoginRejectReason( nextConnection,
+                                LoginRejectReason::WhitelistDenied );
+                            TicketAuthRequests::finish(
+                                nextConnection->ticketServerRequest );
+                            nextConnection->ticketServerRequest = NULL;
+                            }
                         }
-                    }
                     else {
-                        AppLog::errorF( 
-                            "Unexpected result from ticket server, "
-                            "client rejected:  %s", webResult );
                         nextConnection->error = true;
                         nextConnection->errorCauseString =
-                            "Client key check failed "
-                            "(bad ticketServer response)";
+                            "Bad ticketServer response";
+                        setLoginRejectReason( nextConnection,
+                            LoginRejectReason::AuthServiceUnavailable );
+                        TicketAuthRequests::finish(
+                            nextConnection->ticketServerRequest );
+                        nextConnection->ticketServerRequest = NULL;
                         }
-                    delete [] webResult;
                     }
                 }
             else if( nextConnection->ticketServerRequest != NULL &&
@@ -14534,10 +14585,12 @@ int main() {
                 else {
                     // ready to start normal message exchange
                     // with client
+                    nextConnection->loginAccepted = true;
                             
                     AppLog::info( "Got new player logged in" );
                             
-                    delete nextConnection->ticketServerRequest;
+                    TicketAuthRequests::finish(
+                        nextConnection->ticketServerRequest );
                     nextConnection->ticketServerRequest = NULL;
 
                     delete [] nextConnection->sequenceNumberString;
@@ -14572,6 +14625,9 @@ int main() {
                                 nextConnection->error = true;
                                 nextConnection->errorCauseString =
                                     "Invalid live stream target";
+                                setLoginRejectReason( nextConnection,
+                                    LoginRejectReason::LiveUnavailable );
+                                removeConnectionFromList = false;
                                 }
                             }
                         else {
@@ -14590,6 +14646,8 @@ int main() {
                                 nextConnection->error = true;
                                 nextConnection->errorCauseString =
                                     "Target family is not found or does not have fertiles";
+                                setLoginRejectReason( nextConnection,
+                                    LoginRejectReason::FamilyUnavailable );
                                 // Do not remove this connection
                                 // we need to notify them about the famTarget failure
                                 removeConnectionFromList = false;
@@ -14613,7 +14671,7 @@ int main() {
 
                 char result = 
                     readSocketFull( nextConnection->sock,
-                                    nextConnection->sockBuffer );
+                                    nextConnection->sockBuffer, 2048 );
                 
                 if( ! result ) {
                     AppLog::info( "Failed to read from client socket, "
@@ -14949,40 +15007,32 @@ int main() {
                             nextConnection->liveStreamSent = true;
                             }
                         }
-                    else if( strstr( message, "LOGIN" ) != NULL ) {
+                    else if( strncmp( message, "LOGIN", 5 ) == 0 ||
+                             strncmp( message, "LVOLOGIN", 8 ) == 0 ) {
                         
                         SimpleVector<char *> *tokens =
                             tokenizeString( message );
                         
-                        int playerMapD = MAP_D;
-                        if( tokens->size() == 4 || tokens->size() == 5 ||
-                            tokens->size() == 7 ) {
+                        const char *loginTokens[7] = { NULL };
+                        int tokenCount = tokens->size();
+                        for( int t=0; t<tokenCount && t<7; t++ ) {
+                            loginTokens[t] = tokens->getElementDirect( t );
+                        }
+                        ParsedLoginHeader parsed;
+                        int maxTwinCount = SettingsManager::getIntSetting(
+                            "maxTwinPartySize", 4 );
+                        if( parseLoginHeader( loginTokens, tokenCount,
+                                              MAP_D, MAX_MAP_D, maxTwinCount,
+                                              parsed ) ) {
                             
                             // login format: [mMapD@]email[:familyCode|\|spawnCode]
                             nextConnection->email = 
-                                stringDuplicate( 
-                                    tokens->getElementDirect( 1 ) );
-                            nextConnection->mMapD = playerMapD;
-
-                            std::string mMapDAndEmail {tokens->getElementDirect( 1 )};
-                            //printf("email: %s, ", tokens->getElementDirect( 1 ));
-                            //printf("nextconnection->email: %s\n", nextConnection->email);
-
-                            const char mMapDelim = '@';
-                            const size_t mMapDelimPos = mMapDAndEmail.find( mMapDelim );
-                            //printf("mMapDelimPos: %d\n", mMapDelimPos);
-                            if ( mMapDelimPos != std::string::npos && mMapDelimPos <=3 ){
-                                playerMapD = std::stoi( mMapDAndEmail.substr(0, mMapDelimPos) );
-                                //printf("playerMapD: %d\n", playerMapD);
-                                if (playerMapD > MAX_MAP_D) playerMapD = MAP_D;
-
-                                std::string onlyEmail { mMapDAndEmail.substr( mMapDelimPos + 1 ) };
-                                delete[] nextConnection->email;
-                                nextConnection->email = stringDuplicate( onlyEmail.c_str() );
-                                nextConnection->mMapD = playerMapD;
-                                //printf("nMapD: %d\n", nextConnection->mMapD);
-                            }
-                            //printf("mMapD: %d\n", nextConnection->mMapD);
+                                stringDuplicate( parsed.email );
+                            nextConnection->mMapD = parsed.mapD;
+                            nextConnection->liveViewTargetID =
+                                parsed.liveTargetID;
+                            nextConnection->tutorialNumber =
+                                parsed.tutorialNumber;
                             // If email contains string delimiter
                             // Set nextConnection's hashedSpawnSeed to hash of seed
                             // then cut off seed and set email to onlyEmail
@@ -15012,6 +15062,7 @@ int main() {
                                 // Remove seed from email
                                 if( seedDelimPos == 0) {
                                     // There was only a seed not email
+                                    delete [] nextConnection->email;
                                     nextConnection->email = stringDuplicate( "blank_email" );
                                 } else {
                                     std::string onlyEmail { emailAndSeed.substr( 0, seedDelimPos ) };
@@ -15041,6 +15092,7 @@ int main() {
                                     // Remove famTarget from email
                                     if( famTargetDelimPos == 0 ) {
                                         // There was only a famTarget not email
+                                        delete [] nextConnection->email;
                                         nextConnection->email = stringDuplicate( "blank_email" );
                                     } else {
                                         std::string onlyEmail { emailAndFamTarget.substr( 0, famTargetDelimPos ) };
@@ -15055,43 +15107,12 @@ int main() {
 
                             char *pwHash = tokens->getElementDirect( 2 );
                             char *keyHash = tokens->getElementDirect( 3 );
-
-                            // LVOLOGIN(直播旁观登录):第 4 token 是要观看的主播 id,
-                            // 而非 tutorialNumber。因 "LOGIN" 是 "LVOLOGIN" 的后缀,
-                            // strstr 命中同一分支,此处用前缀区分。
-                            char isLiveViewLogin =
-                                ( strncmp( message, "LVOLOGIN", 8 ) == 0 );
-
-                            if( tokens->size() >= 5 ) {
-                                if( isLiveViewLogin ) {
-                                    sscanf( tokens->getElementDirect( 4 ),
-                                            "%d",
-                                            &( nextConnection->liveViewTargetID ) );
-                                    nextConnection->tutorialNumber = 0;
-                                    }
-                                else {
-                                    sscanf( tokens->getElementDirect( 4 ),
-                                            "%d",
-                                            &( nextConnection->tutorialNumber ) );
-                                    }
-                                }
                             
-                            if( tokens->size() == 7 ) {
+                            if( tokenCount == 7 ) {
                                 nextConnection->twinCode =
                                     stringDuplicate( 
                                         tokens->getElementDirect( 5 ) );
-                                
-                                sscanf( tokens->getElementDirect( 6 ),
-                                        "%d", 
-                                        &( nextConnection->twinCount ) );
-
-                                int maxCount = 
-                                    SettingsManager::getIntSetting( 
-                                        "maxTwinPartySize", 4 );
-                                
-                                if( nextConnection->twinCount > maxCount ) {
-                                    nextConnection->twinCount = maxCount;
-                                    }
+                                nextConnection->twinCount = parsed.twinCount;
                                 }
                             
 
@@ -15140,6 +15161,8 @@ int main() {
                                     nextConnection->error = true;
                                     nextConnection->errorCauseString =
                                         "Password check failed";
+                                    setLoginRejectReason( nextConnection,
+                                        LoginRejectReason::ClientIncompatible );
                                     }
 
                                 delete [] trueHash;
@@ -15154,6 +15177,7 @@ int main() {
 
                                 char *url = autoSprintf( 
                                     "%s?action=check_ticket_hash"
+                                    "&reason_version=1"
                                     "&email=%s"
                                     "&hash_value=%s"
                                     "&string_to_hash=%s",
@@ -15165,8 +15189,16 @@ int main() {
                                 delete [] encodedEmail;
 
                                 nextConnection->ticketServerRequest =
-                                    new WebRequest( "GET", url, NULL );
+                                    TicketAuthRequests::start( url );
                                 nextConnection->ticketServerAccepted = false;
+
+                                if( nextConnection->ticketServerRequest == NULL ) {
+                                    nextConnection->error = true;
+                                    nextConnection->errorCauseString =
+                                        "Ticket server request limit reached";
+                                    setLoginRejectReason( nextConnection,
+                                        LoginRejectReason::AuthServiceUnavailable );
+                                }
 
                                 nextConnection->ticketServerRequestStartTime
                                     = currentTime;
@@ -15199,19 +15231,18 @@ int main() {
                                 else {
                                     // ready to start normal message exchange
                                     // with client
+                                    nextConnection->loginAccepted = true;
                             
-				    if (nextConnection->spawnCode == NULL){
-					    seed = "";
-				    }
-				    else {
-					    seed = nextConnection->spawnCode;
-				    }
-				    HostAddress* a = nextConnection->sock->getRemoteHostAddress();
+                                    seed = nextConnection->spawnCode == NULL ?
+                                        "" : nextConnection->spawnCode;
+                                    HostAddress *a =
+                                        nextConnection->sock->getRemoteHostAddress();
                                     AppLog::infoF( "Got new player %s (IP:%s, Seed:%s) logged in",
-					       nextConnection->email, a->mAddressString, seed.c_str());
-                                    
-                                    delete nextConnection->ticketServerRequest;
-                                    nextConnection->ticketServerRequest = NULL;
+                                       nextConnection->email,
+                                       a != NULL && a->mAddressString != NULL ?
+                                           a->mAddressString : "unknown",
+                                       seed.c_str());
+                                    delete a;
                                     
                                     delete [] 
                                         nextConnection->sequenceNumberString;
@@ -15247,6 +15278,9 @@ int main() {
                                                 nextConnection->error = true;
                                                 nextConnection->errorCauseString =
                                                     "Invalid live stream target";
+                                                setLoginRejectReason( nextConnection,
+                                                    LoginRejectReason::LiveUnavailable );
+                                                removeConnectionFromList = false;
                                                 }
                                             }
                                         else {
@@ -15265,6 +15299,8 @@ int main() {
                                                 nextConnection->error = true;
                                                 nextConnection->errorCauseString =
                                                     "Target family is not found or does not have fertiles";
+                                                setLoginRejectReason( nextConnection,
+                                                    LoginRejectReason::FamilyUnavailable );
                                                 // Do not remove this connection
                                                 // we need to notify them about the famTarget failure
                                                 removeConnectionFromList = false;
@@ -15285,6 +15321,8 @@ int main() {
                             nextConnection->error = true;
                             nextConnection->errorCauseString =
                                 "Bad login message";
+                            setLoginRejectReason( nextConnection,
+                                LoginRejectReason::ClientIncompatible );
                             }
 
 
@@ -15297,6 +15335,8 @@ int main() {
                         nextConnection->error = true;
                         nextConnection->errorCauseString =
                             "Unexpected first message";
+                        setLoginRejectReason( nextConnection,
+                            LoginRejectReason::ClientIncompatible );
                         }
                     
                     delete [] message;
@@ -15333,6 +15373,8 @@ int main() {
                     nextConnection->error = true;
                     nextConnection->errorCauseString =
                         "Login timeout";
+                    setLoginRejectReason( nextConnection,
+                        LoginRejectReason::LoginTimeout );
                     }
                 }
             }
@@ -15346,7 +15388,7 @@ int main() {
             
             char result = 
                 readSocketFull( nextConnection->sock,
-                                nextConnection->sockBuffer );
+                                nextConnection->sockBuffer, 2048 );
             
             if( ! result ) {
                 AppLog::info( "Failed to read from twin-waiting client socket, "
@@ -15385,17 +15427,35 @@ int main() {
                 if( nextConnection->error ) {
                 
                     if( nextConnection->rejectedSendTime == 0 ) {
-                        
-                        // try sending REJECTED message at end
-                        // give them 5 seconds to receive it before closing
-                        // the connection
-                        const char *message = "REJECTED\n#";
-                        nextConnection->sock->send( (unsigned char*)message,
-                                                    strlen( message ), 
-                                                false, false );
+                        LoginRejectReason reason =
+                            nextConnection->loginRejectReason;
+                        if( reason == LoginRejectReason::None ) {
+                            reason = nextConnection->loginAccepted ?
+                                LoginRejectReason::JoinUnavailable :
+                                LoginRejectReason::ServerError;
+                        }
+                        nextConnection->rejectSend.prepare( reason );
+                        const char *phase = nextConnection->loginAccepted ?
+                            "join" : nextConnection->email != NULL ?
+                            "authentication" : "greeting";
+                        AppLog::infoF( "[LOGIN_REJECT] connection=%u phase=%s code=%s",
+                            nextConnection->sequenceNumber,
+                            phase,
+                            loginRejectCode( reason ) );
                         nextConnection->rejectedSendTime = currentTime;
                         }
-                    else if( currentTime - nextConnection->rejectedSendTime >
+
+                    if( nextConnection->sock != NULL &&
+                        nextConnection->rejectSend.pending() &&
+                        currentTime - nextConnection->rejectedSendTime <= 5 ) {
+                        int sent = nextConnection->sock->send(
+                            nextConnection->rejectSend.tail(),
+                            nextConnection->rejectSend.remaining(),
+                            false, false );
+                        nextConnection->rejectSend.advance( sent );
+                    }
+
+                    if( currentTime - nextConnection->rejectedSendTime >
                              5 ) {
                         // 5 sec passed since REJECTED sent
                         
