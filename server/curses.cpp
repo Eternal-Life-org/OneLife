@@ -424,7 +424,19 @@ static CurseStatus getCurseLevel( CurseRecord *inRecord ) {
 
 
 
+static void forgetPlayerNames( const char *inEmail ) {
+    for( int index=playerNames.size()-1; index>=0; --index ) {
+        PlayerNameRecord *record = playerNames.getElement( index );
+        if( strcmp( record->email, inEmail ) == 0 ) {
+            delete [] record->name;
+            delete [] record->email;
+            playerNames.deleteElement( index );
+            }
+        }
+    }
+
 void cursesLogBirth( char *inEmail ) {
+    forgetPlayerNames( inEmail );
     stepCurses();
     
     CurseRecord *r = findCurseRecord( inEmail );
@@ -463,36 +475,7 @@ void cursesLogDeath( char *inEmail, double inAge, GridPos inDeathPos ) {
         r->deathTime = curTime;
         }
 
-    for( int i=0; i<playerNames.size(); i++ ) {
-        PlayerNameRecord *r = playerNames.getElement( i );
-        
-        if( strcmp( r->email, inEmail ) == 0 ) {
-            // allow name record to exist for 5 minutes after
-            // player dies
-            r->timeCreated = 
-                Time::getCurrentTime() + 60 * 5 - playerNameTimeout;
-            
-            // push to front of list
-            PlayerNameRecord newRec = *r;
-            playerNames.deleteElement( i );
-
-            // but maintain time-sorted order
-            int numToSkip = 0;
-            
-            for( int j=0; j<playerNames.size(); j++ ) {
-                PlayerNameRecord *rOther = playerNames.getElement( j );
-                if( rOther->timeCreated < r->timeCreated ) {
-                    numToSkip ++;
-                    }
-                else {
-                    break;
-                    }
-                }
-
-            playerNames.push_middle( newRec, numToSkip );
-            break;
-            }
-        }
+    forgetPlayerNames( inEmail );
 
 
     if( useCurseServer ) {
@@ -706,6 +689,8 @@ char *getCurseReceiverEmail( char *inReceiverName ) {
 
 void logPlayerNameForCurses( char *inPlayerEmail, char *inPlayerName,
                              int inLineageEveID ) {
+    forgetPlayerNames( inPlayerEmail );
+    if( !useCurseServer && !usePersonalCurses ) return;
     // structure to track names per player
     PlayerNameRecord r = { stringDuplicate( inPlayerName ),
                            stringDuplicate( inPlayerEmail ),
@@ -790,6 +775,7 @@ CurseStatus getCurseLevel( char *inPlayerEmail ) {
 
 
 char isNameDuplicateForCurses( const char *inPlayerName ) {
+    if( !useCurseServer && !usePersonalCurses ) return false;
     if (inPlayerName == NULL) {
 	return false;
     }
