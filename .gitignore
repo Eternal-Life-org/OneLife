@@ -31,3 +31,5 @@ server/categories
 server/objects
 server/transitions
 .vscode/*
+/.idea/
+.DS_Store
